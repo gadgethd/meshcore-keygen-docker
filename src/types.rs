@@ -18,6 +18,7 @@ pub struct SearchResult {
 /// Live statistics for progress reporting.
 pub struct SearchStats {
     pub attempts: u64,
+    pub expected_attempts: u64,
     pub elapsed_secs: f64,
     pub keys_per_sec: f64,
 }

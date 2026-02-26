@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::thread;
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use rand::rngs::OsRng;
@@ -85,107 +85,106 @@ fn should_skip(public_key: &[u8; 32]) -> bool {
     public_key[0] == 0x00 || public_key[0] == 0xFF
 }
 
-/// Run the vanity key search with the given number of threads.
-///
-/// Returns a `SearchResult` when a matching key is found.
-/// Calls `on_progress` periodically with live stats.
-pub fn search(
-    prefix: &str,
-    num_threads: usize,
-    on_progress: impl Fn(&SearchStats) + Send + Sync + 'static,
-    progress_interval_secs: f64,
-) -> SearchResult {
-    let matcher = Arc::new(PrefixMatcher::new(prefix));
-    let found = Arc::new(AtomicBool::new(false));
-    let total_attempts = Arc::new(AtomicU64::new(0));
-    let start = Instant::now();
+/// Handle for a running vanity key search.
+/// Exposes atomics so a TUI render loop can poll progress directly.
+pub struct SearchHandle {
+    found: Arc<AtomicBool>,
+    attempts: Arc<AtomicU64>,
+    result: Arc<Mutex<Option<MeshCoreKeypair>>>,
+    start: Instant,
+    workers: Vec<JoinHandle<()>>,
+}
 
-    // Storage for the result keypair — shared via mutex
-    let result: Arc<std::sync::Mutex<Option<MeshCoreKeypair>>> =
-        Arc::new(std::sync::Mutex::new(None));
+impl SearchHandle {
+    /// Start a vanity key search in background threads.
+    pub fn start(prefix: &str, num_threads: usize) -> Self {
+        let matcher = Arc::new(PrefixMatcher::new(prefix));
+        let found = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let result: Arc<Mutex<Option<MeshCoreKeypair>>> = Arc::new(Mutex::new(None));
 
-    // Spawn progress reporter thread
-    let progress_found = Arc::clone(&found);
-    let progress_attempts = Arc::clone(&total_attempts);
-    let progress_handle = thread::spawn(move || {
-        let interval = std::time::Duration::from_secs_f64(progress_interval_secs);
-        while !progress_found.load(Ordering::Relaxed) {
-            thread::sleep(interval);
-            if progress_found.load(Ordering::Relaxed) {
-                break;
-            }
-            let attempts = progress_attempts.load(Ordering::Relaxed);
-            let elapsed = start.elapsed().as_secs_f64();
-            on_progress(&SearchStats {
-                attempts,
-                elapsed_secs: elapsed,
-                keys_per_sec: if elapsed > 0.0 {
-                    attempts as f64 / elapsed
-                } else {
-                    0.0
-                },
-            });
+        let mut workers = Vec::with_capacity(num_threads);
+        for _ in 0..num_threads {
+            let matcher = Arc::clone(&matcher);
+            let found = Arc::clone(&found);
+            let total_attempts = Arc::clone(&attempts);
+            let result = Arc::clone(&result);
+
+            workers.push(thread::spawn(move || {
+                let mut seed = [0u8; 32];
+                let mut local_count: u64 = 0;
+
+                while !found.load(Ordering::Relaxed) {
+                    OsRng.fill_bytes(&mut seed);
+                    let kp = generate_keypair(&seed);
+                    local_count += 1;
+
+                    if local_count % BATCH_SIZE == 0 {
+                        total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
+                    }
+
+                    if should_skip(&kp.public_key) {
+                        continue;
+                    }
+
+                    if matcher.matches(&kp.public_key) {
+                        total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+                        found.store(true, Ordering::Relaxed);
+                        *result.lock().unwrap() = Some(kp);
+                        return;
+                    }
+                }
+
+                total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+            }));
         }
-    });
 
-    // Spawn worker threads
-    let mut handles = Vec::with_capacity(num_threads);
-    for _ in 0..num_threads {
-        let matcher = Arc::clone(&matcher);
-        let found = Arc::clone(&found);
-        let total_attempts = Arc::clone(&total_attempts);
-        let result = Arc::clone(&result);
-
-        handles.push(thread::spawn(move || {
-            let mut seed = [0u8; 32];
-            let mut local_count: u64 = 0;
-
-            while !found.load(Ordering::Relaxed) {
-                OsRng.fill_bytes(&mut seed);
-                let kp = generate_keypair(&seed);
-                local_count += 1;
-
-                // Batch atomic counter updates
-                if local_count % BATCH_SIZE == 0 {
-                    total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
-                }
-
-                if should_skip(&kp.public_key) {
-                    continue;
-                }
-
-                if matcher.matches(&kp.public_key) {
-                    // Flush remaining count
-                    total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                    found.store(true, Ordering::Relaxed);
-                    *result.lock().unwrap() = Some(kp);
-                    return;
-                }
-            }
-
-            // Flush remaining count on exit
-            total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-        }));
+        SearchHandle {
+            found,
+            attempts,
+            result,
+            start: Instant::now(),
+            workers,
+        }
     }
 
-    // Wait for all workers
-    for h in handles {
-        h.join().unwrap();
+    /// Check if a match has been found.
+    pub fn is_done(&self) -> bool {
+        self.found.load(Ordering::Relaxed)
     }
 
-    // Signal progress thread to stop and wait
-    found.store(true, Ordering::Relaxed);
-    let _ = progress_handle.join();
+    /// Get current search statistics.
+    pub fn stats(&self, expected: u64) -> SearchStats {
+        let attempts = self.attempts.load(Ordering::Relaxed);
+        let elapsed = self.start.elapsed().as_secs_f64();
+        SearchStats {
+            attempts,
+            expected_attempts: expected,
+            elapsed_secs: elapsed,
+            keys_per_sec: if elapsed > 0.0 {
+                attempts as f64 / elapsed
+            } else {
+                0.0
+            },
+        }
+    }
 
-    let elapsed = start.elapsed().as_secs_f64();
-    let attempts = total_attempts.load(Ordering::Relaxed);
-    let kp = result.lock().unwrap().take().expect("search found a key");
+    /// Join all worker threads and return the result.
+    pub fn finish(self) -> SearchResult {
+        for h in self.workers {
+            h.join().unwrap();
+        }
 
-    SearchResult {
-        public_key: hex::encode_upper(kp.public_key),
-        private_key: hex::encode_upper(kp.private_key),
-        attempts,
-        elapsed_secs: elapsed,
+        let elapsed = self.start.elapsed().as_secs_f64();
+        let attempts = self.attempts.load(Ordering::Relaxed);
+        let kp = self.result.lock().unwrap().take().expect("search found a key");
+
+        SearchResult {
+            public_key: hex::encode_upper(kp.public_key),
+            private_key: hex::encode_upper(kp.private_key),
+            attempts,
+            elapsed_secs: elapsed,
+        }
     }
 }
 
@@ -275,8 +274,9 @@ mod tests {
     }
 
     #[test]
-    fn search_finds_single_char_prefix() {
-        let result = search("A", 2, |_| {}, 60.0);
+    fn search_handle_finds_single_char_prefix() {
+        let handle = SearchHandle::start("A", 2);
+        let result = handle.finish();
         assert!(
             result.public_key.starts_with('A'),
             "expected public key starting with A, got {}",
