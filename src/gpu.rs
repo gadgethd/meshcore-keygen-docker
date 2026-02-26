@@ -99,8 +99,7 @@ impl GpuSearcher {
             prefix_bytes.push(nibble << 4);
         }
 
-        let prefix_upper = prefix.to_ascii_uppercase();
-        let prefix_len = prefix_upper.len() as u32;
+        let prefix_len = prefix.to_ascii_uppercase().len() as u32;
 
         let result_buf = stream
             .alloc_zeros::<u8>(100)

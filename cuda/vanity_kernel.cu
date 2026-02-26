@@ -37,20 +37,6 @@ static uint64_t __device__ load_4(const unsigned char *in) {
     return result;
 }
 
-static uint64_t __device__ load_7(const unsigned char *in) {
-    uint64_t result;
-
-    result = (uint64_t) in[0];
-    result |= ((uint64_t) in[1]) << 8;
-    result |= ((uint64_t) in[2]) << 16;
-    result |= ((uint64_t) in[3]) << 24;
-    result |= ((uint64_t) in[4]) << 32;
-    result |= ((uint64_t) in[5]) << 40;
-    result |= ((uint64_t) in[6]) << 48;
-
-    return result;
-}
-
 
 
 // --- fe type ---
@@ -63,8 +49,7 @@ __device__ void fe_sq2(fe h, const fe f);
 __device__ void fe_tobytes(unsigned char *s, const fe h);
 __device__ void fe_pow22523(fe out, const fe z);
 
-#ifndef FE_CU
-#define FE_CU
+// Field element arithmetic (from solana-perf-libs ref10)
 
 
 /*
@@ -251,75 +236,6 @@ void __device__ fe_cmov(fe f, const fe g, unsigned int b) {
 /*
     Replace (f,g) with (g,f) if b == 1;
     replace (f,g) with (f,g) if b == 0.
-
-    Preconditions: b in {0,1}.
-*/
-
-__device__ void fe_cswap(fe f,fe g,unsigned int b) {
-    int32_t f0 = f[0];
-    int32_t f1 = f[1];
-    int32_t f2 = f[2];
-    int32_t f3 = f[3];
-    int32_t f4 = f[4];
-    int32_t f5 = f[5];
-    int32_t f6 = f[6];
-    int32_t f7 = f[7];
-    int32_t f8 = f[8];
-    int32_t f9 = f[9];
-    int32_t g0 = g[0];
-    int32_t g1 = g[1];
-    int32_t g2 = g[2];
-    int32_t g3 = g[3];
-    int32_t g4 = g[4];
-    int32_t g5 = g[5];
-    int32_t g6 = g[6];
-    int32_t g7 = g[7];
-    int32_t g8 = g[8];
-    int32_t g9 = g[9];
-    int32_t x0 = f0 ^ g0;
-    int32_t x1 = f1 ^ g1;
-    int32_t x2 = f2 ^ g2;
-    int32_t x3 = f3 ^ g3;
-    int32_t x4 = f4 ^ g4;
-    int32_t x5 = f5 ^ g5;
-    int32_t x6 = f6 ^ g6;
-    int32_t x7 = f7 ^ g7;
-    int32_t x8 = f8 ^ g8;
-    int32_t x9 = f9 ^ g9;
-    b = (unsigned int) (- (int) b); /* silence warning */
-    x0 &= b;
-    x1 &= b;
-    x2 &= b;
-    x3 &= b;
-    x4 &= b;
-    x5 &= b;
-    x6 &= b;
-    x7 &= b;
-    x8 &= b;
-    x9 &= b;
-    f[0] = f0 ^ x0;
-    f[1] = f1 ^ x1;
-    f[2] = f2 ^ x2;
-    f[3] = f3 ^ x3;
-    f[4] = f4 ^ x4;
-    f[5] = f5 ^ x5;
-    f[6] = f6 ^ x6;
-    f[7] = f7 ^ x7;
-    f[8] = f8 ^ x8;
-    f[9] = f9 ^ x9;
-    g[0] = g0 ^ x0;
-    g[1] = g1 ^ x1;
-    g[2] = g2 ^ x2;
-    g[3] = g3 ^ x3;
-    g[4] = g4 ^ x4;
-    g[5] = g5 ^ x5;
-    g[6] = g6 ^ x6;
-    g[7] = g7 ^ x7;
-    g[8] = g8 ^ x8;
-    g[9] = g9 ^ x9;
-}
-
-
 
 /*
     h = f
@@ -836,63 +752,6 @@ Preconditions:
 Postconditions:
    |h| bounded by 1.1*2^25,1.1*2^24,1.1*2^25,1.1*2^24,etc.
 */
-
-__device__ void fe_mul121666(fe h, fe f) {
-    int32_t f0 = f[0];
-    int32_t f1 = f[1];
-    int32_t f2 = f[2];
-    int32_t f3 = f[3];
-    int32_t f4 = f[4];
-    int32_t f5 = f[5];
-    int32_t f6 = f[6];
-    int32_t f7 = f[7];
-    int32_t f8 = f[8];
-    int32_t f9 = f[9];
-    int64_t h0 = f0 * (int64_t) 121666;
-    int64_t h1 = f1 * (int64_t) 121666;
-    int64_t h2 = f2 * (int64_t) 121666;
-    int64_t h3 = f3 * (int64_t) 121666;
-    int64_t h4 = f4 * (int64_t) 121666;
-    int64_t h5 = f5 * (int64_t) 121666;
-    int64_t h6 = f6 * (int64_t) 121666;
-    int64_t h7 = f7 * (int64_t) 121666;
-    int64_t h8 = f8 * (int64_t) 121666;
-    int64_t h9 = f9 * (int64_t) 121666;
-    int64_t carry0;
-    int64_t carry1;
-    int64_t carry2;
-    int64_t carry3;
-    int64_t carry4;
-    int64_t carry5;
-    int64_t carry6;
-    int64_t carry7;
-    int64_t carry8;
-    int64_t carry9;
-
-    carry9 = (h9 + (int64_t) (1<<24)) >> 25; h0 += carry9 * 19; h9 -= carry9 << 25;
-    carry1 = (h1 + (int64_t) (1<<24)) >> 25; h2 += carry1; h1 -= carry1 << 25;
-    carry3 = (h3 + (int64_t) (1<<24)) >> 25; h4 += carry3; h3 -= carry3 << 25;
-    carry5 = (h5 + (int64_t) (1<<24)) >> 25; h6 += carry5; h5 -= carry5 << 25;
-    carry7 = (h7 + (int64_t) (1<<24)) >> 25; h8 += carry7; h7 -= carry7 << 25;
-
-    carry0 = (h0 + (int64_t) (1<<25)) >> 26; h1 += carry0; h0 -= carry0 << 26;
-    carry2 = (h2 + (int64_t) (1<<25)) >> 26; h3 += carry2; h2 -= carry2 << 26;
-    carry4 = (h4 + (int64_t) (1<<25)) >> 26; h5 += carry4; h4 -= carry4 << 26;
-    carry6 = (h6 + (int64_t) (1<<25)) >> 26; h7 += carry6; h6 -= carry6 << 26;
-    carry8 = (h8 + (int64_t) (1<<25)) >> 26; h9 += carry8; h8 -= carry8 << 26;
-
-    h[0] = (int32_t) h0;
-    h[1] = (int32_t) h1;
-    h[2] = (int32_t) h2;
-    h[3] = (int32_t) h3;
-    h[4] = (int32_t) h4;
-    h[5] = (int32_t) h5;
-    h[6] = (int32_t) h6;
-    h[7] = (int32_t) h7;
-    h[8] = (int32_t) h8;
-    h[9] = (int32_t) h9;
-}
-
 
 /*
 h = -f
@@ -1550,7 +1409,6 @@ void __device__ fe_tobytes(unsigned char *s, const fe h) {
     s[30] = (unsigned char) (h9 >> 10);
     s[31] = (unsigned char) (h9 >> 18);
 }
-#endif
 
 // --- ge types ---
 typedef struct { fe X; fe Y; fe Z; } ge_p2;
@@ -2995,155 +2853,6 @@ void __device__ ge_add(ge_p1p1 *r, const ge_p3 *p, const ge_cached *q) {
     fe_add(r->Y, r->Z, r->Y);
     fe_add(r->Z, t0, r->T);
     fe_sub(r->T, t0, r->T);
-}
-
-
-static void __device__ slide(signed char *r, const unsigned char *a) {
-    int i;
-    int b;
-    int k;
-
-    for (i = 0; i < 256; ++i) {
-        r[i] = 1 & (a[i >> 3] >> (i & 7));
-    }
-
-    for (i = 0; i < 256; ++i)
-        if (r[i]) {
-            for (b = 1; b <= 6 && i + b < 256; ++b) {
-                if (r[i + b]) {
-                    if (r[i] + (r[i + b] << b) <= 15) {
-                        r[i] += r[i + b] << b;
-                        r[i + b] = 0;
-                    } else if (r[i] - (r[i + b] << b) >= -15) {
-                        r[i] -= r[i + b] << b;
-
-                        for (k = i + b; k < 256; ++k) {
-                            if (!r[k]) {
-                                r[k] = 1;
-                                break;
-                            }
-
-                            r[k] = 0;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-}
-
-// x = 1, y = 0, z = 0, t = 1
-int __device__ ge_is_identity(ge_p3* p) {
-    return (fe_is_0(p->X) &&
-            fe_is_1(p->Y) &&
-            fe_is_1(p->Z) &&
-            fe_is_0(p->T)) ? 1 : 0;
-}
-
-int __device__ ge_is_small_order(ge_p3* p) {
-    ge_p1p1 r;
-    ge_p2 s;
-    ge_p3 q;
-
-    // calculate q = p * 2*3
-    ge_p3_dbl(&r, p);
-    ge_p1p1_to_p2(&s, &r);
-    ge_p2_dbl(&r, &s);
-    ge_p1p1_to_p2(&s, &r);
-    ge_p2_dbl(&r, &s);
-    ge_p1p1_to_p3(&q, &r);
-
-    return ge_is_identity(&q);
-}
-
-int __device__ ge_gen_lookup(const unsigned char* public_key, ge_cached* Ai) {
-    ge_p3 A;
-
-    if (0 != ge_frombytes_negate_vartime(&A, public_key)) {
-        return 0;
-    }
-
-    if (0 != ge_is_small_order(&A)) {
-        return 0;
-    }
-
-    ge_p1p1 t;
-    ge_p3 u;
-    ge_p3 A2;
-
-    ge_p3_to_cached(&Ai[0], &A);
-    ge_p3_dbl(&t, &A);
-    ge_p1p1_to_p3(&A2, &t);
-    ge_add(&t, &A2, &Ai[0]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[1], &u);
-    ge_add(&t, &A2, &Ai[1]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[2], &u);
-    ge_add(&t, &A2, &Ai[2]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[3], &u);
-    ge_add(&t, &A2, &Ai[3]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[4], &u);
-    ge_add(&t, &A2, &Ai[4]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[5], &u);
-    ge_add(&t, &A2, &Ai[5]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[6], &u);
-    ge_add(&t, &A2, &Ai[6]);
-    ge_p1p1_to_p3(&u, &t);
-    ge_p3_to_cached(&Ai[7], &u);
-
-    return 1;
-}
-
-/*
-r = a * A + b * B
-where a = a[0]+256*a[1]+...+256^31 a[31].
-and b = b[0]+256*b[1]+...+256^31 b[31].
-B is the Ed25519 base point (x,4/5) with x positive.
-*/
-
-void __device__ ge_double_scalarmult_vartime(ge_p2 *r, const unsigned char *a, const ge_cached* Ai, const unsigned char *b) {
-    signed char aslide[256];
-    signed char bslide[256];
-    ge_p1p1 t;
-    ge_p3 u;
-    int i;
-    slide(aslide, a);
-    slide(bslide, b);
-    ge_p2_0(r);
-
-    for (i = 255; i >= 0; --i) {
-        if (aslide[i] || bslide[i]) {
-            break;
-        }
-    }
-
-    for (; i >= 0; --i) {
-        ge_p2_dbl(&t, r);
-
-        bool a_gt_zero = aslide[i] > 0;
-        bool a_lt_zero = aslide[i] < 0;
-        if (a_gt_zero || a_lt_zero) {
-            ge_p1p1_to_p3(&u, &t);
-            const ge_cached* p = a_gt_zero ? &Ai[aslide[i] / 2] : &Ai[(-aslide[i]) / 2];
-            ge_addsub(&t, &u, p, a_gt_zero);
-        }
-
-        bool b_gt_zero = bslide[i] > 0;
-        bool b_lt_zero = bslide[i] < 0;
-        if (b_gt_zero || b_lt_zero) {
-            ge_p1p1_to_p3(&u, &t);
-            const ge_precomp* p = b_gt_zero ? &Bi[bslide[i] / 2] : &Bi[(-bslide[i]) / 2];
-            ge_maddsub(&t, &u, p, b_gt_zero);
-        }
-
-        ge_p1p1_to_p2(r, &t);
-    }
 }
 
 
