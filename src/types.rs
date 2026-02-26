@@ -11,6 +11,7 @@ pub struct MeshCoreKeypair {
 pub struct SearchResult {
     pub public_key: String,
     pub private_key: String,
+    pub matched_prefix: String,
     pub attempts: u64,
     pub elapsed_secs: f64,
 }

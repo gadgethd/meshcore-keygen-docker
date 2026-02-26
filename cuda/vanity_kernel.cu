@@ -3378,8 +3378,31 @@ __device__ int check_prefix(const u8 *pubkey, const u8 *prefix_bytes,
     return 1;
 }
 
+// Check pubkey against all prefixes in packed buffer.
+// Buffer format: [count: u32] then for each: [nibbles: u32][bytes..padded to 4-byte alignment]
+// Returns 1 if any prefix matches, 0 otherwise.
+__device__ int check_any_prefix(const u8 *pubkey, const u8 *prefix_data,
+                                unsigned int prefix_count) {
+    // Skip past the count field (first 4 bytes already parsed by caller)
+    const u8 *ptr = prefix_data + 4;
+    for (unsigned int p = 0; p < prefix_count; p++) {
+        unsigned int nibbles = ((unsigned int)ptr[0])
+                             | ((unsigned int)ptr[1] << 8)
+                             | ((unsigned int)ptr[2] << 16)
+                             | ((unsigned int)ptr[3] << 24);
+        ptr += 4;
+        const u8 *bytes = ptr;
+        unsigned int byte_count = (nibbles + 1) / 2;
+        // Advance ptr past bytes + padding to 4-byte alignment
+        unsigned int padded = (byte_count + 3) & ~3u;
+        ptr += padded;
+        if (check_prefix(pubkey, bytes, nibbles)) return 1;
+    }
+    return 0;
+}
+
 extern "C" __global__ void vanity_search(
-    u8 *result, const u8 *prefix_bytes, unsigned int prefix_nibbles,
+    u8 *result, const u8 *prefix_data, unsigned int prefix_count,
     unsigned long long base_nonce, unsigned long long iters_per_thread)
 {
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3399,7 +3422,7 @@ extern "C" __global__ void vanity_search(
         u8 pubkey[32];
         ge_p3_tobytes(pubkey, &A);
         if (pubkey[0] == 0x00 || pubkey[0] == 0xFF) continue;
-        if (check_prefix(pubkey, prefix_bytes, prefix_nibbles)) {
+        if (check_any_prefix(pubkey, prefix_data, prefix_count)) {
             unsigned int old = atomicCAS((unsigned int *)result, 0, 1);
             if (old == 0) {
                 for (int i = 0; i < 32; i++) result[4 + i] = pubkey[i];

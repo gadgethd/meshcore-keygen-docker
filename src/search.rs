@@ -85,27 +85,38 @@ fn should_skip(public_key: &[u8; 32]) -> bool {
     public_key[0] == 0x00 || public_key[0] == 0xFF
 }
 
+/// Internal result containing keypair + which prefix matched.
+struct MatchResult {
+    keypair: MeshCoreKeypair,
+    matched_prefix: String,
+}
+
 /// Handle for a running vanity key search.
 /// Exposes atomics so a TUI render loop can poll progress directly.
 pub struct SearchHandle {
     found: Arc<AtomicBool>,
     attempts: Arc<AtomicU64>,
-    result: Arc<Mutex<Option<MeshCoreKeypair>>>,
+    result: Arc<Mutex<Option<MatchResult>>>,
     start: Instant,
     workers: Vec<JoinHandle<()>>,
 }
 
 impl SearchHandle {
     /// Start a vanity key search in background threads.
-    pub fn start(prefix: &str, num_threads: usize) -> Self {
-        let matcher = Arc::new(PrefixMatcher::new(prefix));
+    pub fn start(prefixes: &[String], num_threads: usize) -> Self {
+        let matchers: Arc<Vec<(String, PrefixMatcher)>> = Arc::new(
+            prefixes
+                .iter()
+                .map(|p| (p.clone(), PrefixMatcher::new(p)))
+                .collect(),
+        );
         let found = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU64::new(0));
-        let result: Arc<Mutex<Option<MeshCoreKeypair>>> = Arc::new(Mutex::new(None));
+        let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
 
         let mut workers = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
-            let matcher = Arc::clone(&matcher);
+            let matchers = Arc::clone(&matchers);
             let found = Arc::clone(&found);
             let total_attempts = Arc::clone(&attempts);
             let result = Arc::clone(&result);
@@ -127,10 +138,14 @@ impl SearchHandle {
                         continue;
                     }
 
-                    if matcher.matches(&kp.public_key) {
+                    if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
+                    {
                         total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
                         found.store(true, Ordering::Relaxed);
-                        *result.lock().unwrap() = Some(kp);
+                        *result.lock().unwrap() = Some(MatchResult {
+                            keypair: kp,
+                            matched_prefix: matched.0.clone(),
+                        });
                         return;
                     }
                 }
@@ -177,11 +192,12 @@ impl SearchHandle {
 
         let elapsed = self.start.elapsed().as_secs_f64();
         let attempts = self.attempts.load(Ordering::Relaxed);
-        let kp = self.result.lock().unwrap().take().expect("search found a key");
+        let m = self.result.lock().unwrap().take().expect("search found a key");
 
         SearchResult {
-            public_key: hex::encode_upper(kp.public_key),
-            private_key: hex::encode_upper(kp.private_key),
+            public_key: hex::encode_upper(m.keypair.public_key),
+            private_key: hex::encode_upper(m.keypair.private_key),
+            matched_prefix: m.matched_prefix,
             attempts,
             elapsed_secs: elapsed,
         }
@@ -190,12 +206,13 @@ impl SearchHandle {
     /// Start a vanity key search on GPU. Spawns a single thread that runs the
     /// GPU launch loop, updating the same atomics as the CPU path.
     #[cfg(feature = "cuda")]
-    pub fn start_gpu(prefix: &str) -> Result<Self, crate::gpu::GpuError> {
+    pub fn start_gpu(prefixes: &[String]) -> Result<Self, crate::gpu::GpuError> {
         let found = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU64::new(0));
-        let result: Arc<Mutex<Option<MeshCoreKeypair>>> = Arc::new(Mutex::new(None));
+        let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
 
-        let mut gpu_searcher = crate::gpu::GpuSearcher::new(prefix)?;
+        let mut gpu_searcher = crate::gpu::GpuSearcher::new(prefixes)?;
+        let prefixes_owned: Vec<String> = prefixes.to_vec();
 
         let found_clone = Arc::clone(&found);
         let attempts_clone = Arc::clone(&attempts);
@@ -207,13 +224,28 @@ impl SearchHandle {
             OsRng.fill_bytes(&mut nonce_bytes);
             let mut base_nonce: u64 = u64::from_le_bytes(nonce_bytes);
 
+            // Build CPU-side matchers for identifying which prefix matched
+            let matchers: Vec<(String, PrefixMatcher)> = prefixes_owned
+                .iter()
+                .map(|p| (p.clone(), PrefixMatcher::new(p)))
+                .collect();
+
             while !found_clone.load(Ordering::Relaxed) {
                 match gpu_searcher.search_batch(base_nonce) {
                     Ok(batch_result) => {
                         attempts_clone.fetch_add(batch_result.keys_checked, Ordering::Relaxed);
                         if let Some(kp) = batch_result.keypair {
                             found_clone.store(true, Ordering::Relaxed);
-                            *result_clone.lock().unwrap() = Some(kp);
+                            // Identify which prefix matched
+                            let matched_prefix = matchers
+                                .iter()
+                                .find(|(_, m)| m.matches(&kp.public_key))
+                                .map(|(p, _)| p.clone())
+                                .unwrap_or_else(|| prefixes_owned[0].clone());
+                            *result_clone.lock().unwrap() = Some(MatchResult {
+                                keypair: kp,
+                                matched_prefix,
+                            });
                             return;
                         }
                         base_nonce = base_nonce.wrapping_add(batch_result.keys_checked);
@@ -323,12 +355,29 @@ mod tests {
 
     #[test]
     fn search_handle_finds_single_char_prefix() {
-        let handle = SearchHandle::start("A", 2);
+        let handle = SearchHandle::start(&["A".to_string()], 2);
         let result = handle.finish();
         assert!(
             result.public_key.starts_with('A'),
             "expected public key starting with A, got {}",
             result.public_key
+        );
+        assert_eq!(result.matched_prefix, "A");
+    }
+
+    #[test]
+    fn search_handle_multiple_prefixes() {
+        let handle = SearchHandle::start(&["A".to_string(), "B".to_string()], 2);
+        let result = handle.finish();
+        assert!(
+            result.public_key.starts_with('A') || result.public_key.starts_with('B'),
+            "expected public key starting with A or B, got {}",
+            result.public_key
+        );
+        assert!(
+            result.matched_prefix == "A" || result.matched_prefix == "B",
+            "expected matched_prefix A or B, got {}",
+            result.matched_prefix
         );
     }
 }

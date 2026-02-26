@@ -24,8 +24,8 @@ pub struct GpuSearcher {
     func: CudaFunction,
     result_buf: CudaSlice<u8>,
     grid_size: u32,
-    prefix_bytes: Vec<u8>,
-    prefix_len: u32,
+    prefix_data: Vec<u8>,
+    prefix_count: u32,
 }
 
 /// GPU search errors.
@@ -80,7 +80,8 @@ fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), GpuError> {
 
 impl GpuSearcher {
     /// Compile the CUDA kernel and prepare for searching.
-    pub fn new(prefix: &str) -> Result<Self, GpuError> {
+    /// Packs prefixes into a buffer: [count: u32][nibbles0: u32][bytes0..padded to 4][nibbles1: u32][bytes1..]...]
+    pub fn new(prefixes: &[String]) -> Result<Self, GpuError> {
         let (module, stream) = compile_kernel()?;
 
         let func = module
@@ -93,13 +94,25 @@ impl GpuSearcher {
             .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
         let grid_size = (sm_count as u32) * 2;
 
-        let matcher = PrefixMatcher::new(prefix);
-        let mut prefix_bytes = matcher.full_bytes.clone();
-        if let Some(nibble) = matcher.trailing_nibble {
-            prefix_bytes.push(nibble << 4);
-        }
+        // Pack prefix data: [count: u32] then for each prefix: [nibbles: u32][bytes..padded to 4 alignment]
+        let prefix_count = prefixes.len() as u32;
+        let mut prefix_data: Vec<u8> = Vec::new();
+        prefix_data.extend_from_slice(&prefix_count.to_le_bytes());
 
-        let prefix_len = prefix.to_ascii_uppercase().len() as u32;
+        for p in prefixes {
+            let matcher = PrefixMatcher::new(p);
+            let mut bytes = matcher.full_bytes.clone();
+            if let Some(nibble) = matcher.trailing_nibble {
+                bytes.push(nibble << 4);
+            }
+            let nibbles = p.len() as u32;
+            prefix_data.extend_from_slice(&nibbles.to_le_bytes());
+            prefix_data.extend_from_slice(&bytes);
+            // Pad to 4-byte alignment
+            while prefix_data.len() % 4 != 0 {
+                prefix_data.push(0);
+            }
+        }
 
         let result_buf = stream
             .alloc_zeros::<u8>(100)
@@ -110,8 +123,8 @@ impl GpuSearcher {
             func,
             result_buf,
             grid_size,
-            prefix_bytes,
-            prefix_len,
+            prefix_data,
+            prefix_count,
         })
     }
 
@@ -126,7 +139,7 @@ impl GpuSearcher {
 
         let prefix_dev = self
             .stream
-            .clone_htod(&self.prefix_bytes)
+            .clone_htod(&self.prefix_data)
             .map_err(|e| GpuError::CudaDriver(format!("{}", e)))?;
 
         let cfg = LaunchConfig {
@@ -140,7 +153,7 @@ impl GpuSearcher {
                 .launch_builder(&self.func)
                 .arg(&mut self.result_buf)
                 .arg(&prefix_dev)
-                .arg(&self.prefix_len)
+                .arg(&self.prefix_count)
                 .arg(&base_nonce)
                 .arg(&ITERS_PER_THREAD)
                 .launch(cfg)

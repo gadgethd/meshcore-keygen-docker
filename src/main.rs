@@ -23,8 +23,9 @@ use search::SearchHandle;
 #[derive(Parser)]
 #[command(name = "mc-keygen", version, about = "MeshCore vanity Ed25519 key generator")]
 struct Cli {
-    /// Hex prefix to search for (1-8 chars, 0-9/A-F)
-    prefix: String,
+    /// Hex prefix(es) to search for (1-8 chars, 0-9/A-F each)
+    #[arg(required = true)]
+    prefix: Vec<String>,
 
     /// Number of worker threads (default: all cores)
     #[arg(short = 't', long = "threads")]
@@ -99,7 +100,7 @@ fn format_duration(secs: f64) -> String {
 
 fn run_tui_loop(
     handle: SearchHandle,
-    prefix: &str,
+    prefixes: &[String],
     expected: u64,
     mode_label: &str,
 ) -> io::Result<types::SearchResult> {
@@ -107,11 +108,24 @@ fn run_tui_loop(
     execute!(stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
+    let prefix_display = if prefixes.len() == 1 {
+        prefixes[0].clone()
+    } else {
+        prefixes.join(", ")
+    };
+    let prefix_label = if prefixes.len() == 1 {
+        "Searching for prefix: ".to_string()
+    } else {
+        format!("Searching for {} prefixes: ", prefixes.len())
+    };
+
     let result = loop {
         let stats = handle.stats(expected);
         let done = handle.is_done();
 
         let mode_label_owned = mode_label.to_string();
+        let prefix_label_owned = prefix_label.clone();
+        let prefix_display_owned = prefix_display.clone();
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -141,9 +155,9 @@ fn run_tui_loop(
 
             // Prefix line
             let prefix_line = Line::from(vec![
-                Span::styled("Searching for prefix: ", Style::default().fg(Color::Gray)),
+                Span::styled(&*prefix_label_owned, Style::default().fg(Color::Gray)),
                 Span::styled(
-                    prefix,
+                    &*prefix_display_owned,
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -246,7 +260,7 @@ fn run_tui_loop(
     Ok(result)
 }
 
-fn print_colored_result(result: &types::SearchResult, prefix: &str) {
+fn print_colored_result(result: &types::SearchResult) {
     use crossterm::style::{self, Stylize};
 
     // Green checkmark + bold "Match found!" line
@@ -270,8 +284,8 @@ fn print_colored_result(result: &types::SearchResult, prefix: &str) {
     );
     eprintln!();
 
-    // Public key with prefix highlighted
-    let prefix_len = prefix.len();
+    // Public key with matched prefix highlighted
+    let prefix_len = result.matched_prefix.len();
     let pk_prefix = &result.public_key[..prefix_len];
     let pk_rest = &result.public_key[prefix_len..];
     eprint!(
@@ -309,17 +323,20 @@ fn print_colored_error(msg: &str) {
 fn main() {
     let cli = Cli::parse();
 
-    let prefix = match validate_prefix(&cli.prefix) {
-        Ok(p) => p,
-        Err(e) => {
-            if cli.json {
-                eprintln!("Error: {}", e);
-            } else {
-                print_colored_error(&e);
+    let mut prefixes = Vec::new();
+    for raw in &cli.prefix {
+        match validate_prefix(raw) {
+            Ok(p) => prefixes.push(p),
+            Err(e) => {
+                if cli.json {
+                    eprintln!("Error: {}", e);
+                } else {
+                    print_colored_error(&e);
+                }
+                std::process::exit(1);
             }
-            std::process::exit(1);
         }
-    };
+    }
 
     let num_threads = cli.threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -327,7 +344,16 @@ fn main() {
             .unwrap_or(1)
     });
 
-    let expected = 16u64.pow(prefix.len() as u32);
+    // Expected attempts: use shortest prefix length, divided by count of same-length prefixes
+    let min_len = prefixes.iter().map(|p| p.len()).min().unwrap();
+    let same_len_count = prefixes.iter().filter(|p| p.len() == min_len).count() as u64;
+    let expected = 16u64.pow(min_len as u32) / same_len_count;
+
+    let prefix_count_label = if prefixes.len() == 1 {
+        String::new()
+    } else {
+        format!(", {} prefixes", prefixes.len())
+    };
 
     #[cfg(feature = "cuda")]
     let use_gpu = cli.gpu;
@@ -352,7 +378,7 @@ fn main() {
     if use_gpu {
         #[cfg(feature = "cuda")]
         {
-            let handle = match SearchHandle::start_gpu(&prefix) {
+            let handle = match SearchHandle::start_gpu(&prefixes) {
                 Ok(h) => h,
                 Err(e) => {
                     if cli.json {
@@ -364,36 +390,37 @@ fn main() {
                 }
             };
 
+            let mode_label = format!("GPU{}", prefix_count_label);
             if cli.json {
                 let result = handle.finish();
                 println!("{}", serde_json::to_string_pretty(&result).unwrap());
             } else {
-                let result = match run_tui_loop(handle, &prefix, expected, "GPU") {
+                let result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("TUI error: {}, falling back to simple mode", e);
-                        let handle = SearchHandle::start_gpu(&prefix).unwrap();
+                        let handle = SearchHandle::start_gpu(&prefixes).unwrap();
                         handle.finish()
                     }
                 };
-                print_colored_result(&result, &prefix);
+                print_colored_result(&result);
             }
         }
     } else if cli.json {
-        let handle = SearchHandle::start(&prefix, num_threads);
+        let handle = SearchHandle::start(&prefixes, num_threads);
         let result = handle.finish();
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
     } else {
-        let mode_label = format!("{} threads", num_threads);
-        let handle = SearchHandle::start(&prefix, num_threads);
-        let result = match run_tui_loop(handle, &prefix, expected, &mode_label) {
+        let mode_label = format!("{} threads{}", num_threads, prefix_count_label);
+        let handle = SearchHandle::start(&prefixes, num_threads);
+        let result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("TUI error: {}, falling back to simple mode", e);
-                let handle = SearchHandle::start(&prefix, num_threads);
+                let handle = SearchHandle::start(&prefixes, num_threads);
                 handle.finish()
             }
         };
-        print_colored_result(&result, &prefix);
+        print_colored_result(&result);
     }
 }
