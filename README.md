@@ -24,16 +24,27 @@ mc-keygen ABCDEF --gpu   # use GPU for longer prefixes
 
 Prefix length determines difficulty — each hex char multiplies expected attempts by 16:
 
-| Prefix | Expected attempts | CPU (~3M keys/s) | GPU (~150M keys/s) |
-|--------|-------------------|-------------------|---------------------|
-| 1 char | 16                | instant           | instant             |
-| 2 char | 256               | instant           | instant             |
-| 3 char | 4,096             | <1s               | instant             |
-| 4 char | 65,536            | <1s               | instant             |
-| 5 char | ~1M               | <1s               | instant             |
-| 6 char | ~16M              | ~5s               | <1s                 |
-| 7 char | ~268M             | ~90s              | ~2s                 |
-| 8 char | ~4.3B             | ~24m              | ~30s                |
+| Prefix | Expected attempts | CPU time | GPU time |
+|--------|-------------------|----------|----------|
+| 1 char | 16                | instant  | instant  |
+| 2 char | 256               | instant  | instant  |
+| 3 char | 4,096             | instant  | instant  |
+| 4 char | 65,536            | instant  | instant  |
+| 5 char | ~1M               | <1s      | instant  |
+| 6 char | ~16M              | ~12s     | <1s      |
+| 7 char | ~268M             | ~3.5m    | ~4s      |
+| 8 char | ~4.3B             | ~55m     | ~63s     |
+
+## Performance
+
+Measured throughput on real hardware:
+
+| | Throughput | Hardware |
+|-|------------|----------|
+| **CPU** | ~1.3M keys/sec | AMD Ryzen 9 7950X3D (32 threads) |
+| **GPU** | ~68M keys/sec | NVIDIA RTX 4090 (24GB) |
+
+The GPU is roughly **50x faster** than the CPU on this hardware. The speedup comes from running the full Ed25519 pipeline (SHA-512, scalar multiply, point compress, prefix check) across thousands of GPU threads in parallel.
 
 ## Building
 
