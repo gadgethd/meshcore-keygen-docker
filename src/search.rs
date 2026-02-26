@@ -15,9 +15,9 @@ const BATCH_SIZE: u64 = 1024;
 /// Avoids hex-encoding every public key in the hot loop.
 pub struct PrefixMatcher {
     /// Full bytes to match (pairs of hex chars).
-    full_bytes: Vec<u8>,
+    pub(crate) full_bytes: Vec<u8>,
     /// If prefix has odd length, the high nibble of the trailing hex char.
-    trailing_nibble: Option<u8>,
+    pub(crate) trailing_nibble: Option<u8>,
 }
 
 impl PrefixMatcher {
@@ -185,6 +185,54 @@ impl SearchHandle {
             attempts,
             elapsed_secs: elapsed,
         }
+    }
+
+    /// Start a vanity key search on GPU. Spawns a single thread that runs the
+    /// GPU launch loop, updating the same atomics as the CPU path.
+    #[cfg(feature = "cuda")]
+    pub fn start_gpu(prefix: &str) -> Result<Self, crate::gpu::GpuError> {
+        let found = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let result: Arc<Mutex<Option<MeshCoreKeypair>>> = Arc::new(Mutex::new(None));
+
+        let mut gpu_searcher = crate::gpu::GpuSearcher::new(prefix)?;
+
+        let found_clone = Arc::clone(&found);
+        let attempts_clone = Arc::clone(&attempts);
+        let result_clone = Arc::clone(&result);
+
+        let worker = thread::spawn(move || {
+            // Use OS randomness for the initial nonce so different runs don't overlap
+            let mut nonce_bytes = [0u8; 8];
+            OsRng.fill_bytes(&mut nonce_bytes);
+            let mut base_nonce: u64 = u64::from_le_bytes(nonce_bytes);
+
+            while !found_clone.load(Ordering::Relaxed) {
+                match gpu_searcher.search_batch(base_nonce) {
+                    Ok(batch_result) => {
+                        attempts_clone.fetch_add(batch_result.keys_checked, Ordering::Relaxed);
+                        if let Some(kp) = batch_result.keypair {
+                            found_clone.store(true, Ordering::Relaxed);
+                            *result_clone.lock().unwrap() = Some(kp);
+                            return;
+                        }
+                        base_nonce = base_nonce.wrapping_add(batch_result.keys_checked);
+                    }
+                    Err(e) => {
+                        eprintln!("GPU error: {}", e);
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(SearchHandle {
+            found,
+            attempts,
+            result,
+            start: Instant::now(),
+            workers: vec![worker],
+        })
     }
 }
 

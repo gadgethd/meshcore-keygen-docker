@@ -1,4 +1,6 @@
 mod keygen;
+#[cfg(feature = "cuda")]
+mod gpu;
 mod search;
 mod types;
 
@@ -31,6 +33,16 @@ struct Cli {
     /// Output result as JSON
     #[arg(long)]
     json: bool,
+
+    /// Use GPU (CUDA) for key search
+    #[cfg(feature = "cuda")]
+    #[arg(long)]
+    gpu: bool,
+
+    /// Verify GPU keygen matches CPU (run 64 test seeds and compare)
+    #[cfg(feature = "cuda")]
+    #[arg(long)]
+    verify: bool,
 }
 
 fn validate_prefix(prefix: &str) -> Result<String, String> {
@@ -85,13 +97,12 @@ fn format_duration(secs: f64) -> String {
     }
 }
 
-fn run_tui_search(
+fn run_tui_loop(
+    handle: SearchHandle,
     prefix: &str,
-    num_threads: usize,
     expected: u64,
+    mode_label: &str,
 ) -> io::Result<types::SearchResult> {
-    let handle = SearchHandle::start(prefix, num_threads);
-
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
@@ -100,6 +111,7 @@ fn run_tui_search(
         let stats = handle.stats(expected);
         let done = handle.is_done();
 
+        let mode_label_owned = mode_label.to_string();
         terminal.draw(|frame| {
             let area = frame.area();
 
@@ -135,7 +147,7 @@ fn run_tui_search(
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("  ({} threads)", num_threads),
+                    format!("  ({})", mode_label_owned),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);
@@ -317,17 +329,66 @@ fn main() {
 
     let expected = 16u64.pow(prefix.len() as u32);
 
-    if cli.json {
-        // JSON mode: no TUI, no progress, just run and print result
+    #[cfg(feature = "cuda")]
+    let use_gpu = cli.gpu;
+    #[cfg(not(feature = "cuda"))]
+    let use_gpu = false;
+
+    #[cfg(feature = "cuda")]
+    if cli.verify {
+        eprint!("Compiling CUDA kernel and running verification... ");
+        match gpu::verify_gpu_keygen() {
+            Ok(()) => {
+                eprintln!("PASSED");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("FAILED: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if use_gpu {
+        #[cfg(feature = "cuda")]
+        {
+            let handle = match SearchHandle::start_gpu(&prefix) {
+                Ok(h) => h,
+                Err(e) => {
+                    if cli.json {
+                        eprintln!("Error: {}", e);
+                    } else {
+                        print_colored_error(&format!("{}", e));
+                    }
+                    std::process::exit(1);
+                }
+            };
+
+            if cli.json {
+                let result = handle.finish();
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                let result = match run_tui_loop(handle, &prefix, expected, "GPU") {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("TUI error: {}, falling back to simple mode", e);
+                        let handle = SearchHandle::start_gpu(&prefix).unwrap();
+                        handle.finish()
+                    }
+                };
+                print_colored_result(&result, &prefix);
+            }
+        }
+    } else if cli.json {
         let handle = SearchHandle::start(&prefix, num_threads);
         let result = handle.finish();
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
     } else {
-        // TUI mode with progress bar
-        let result = match run_tui_search(&prefix, num_threads, expected) {
+        let mode_label = format!("{} threads", num_threads);
+        let handle = SearchHandle::start(&prefix, num_threads);
+        let result = match run_tui_loop(handle, &prefix, expected, &mode_label) {
             Ok(r) => r,
             Err(e) => {
-                // If TUI fails (e.g., not a terminal), fall back to simple output
                 eprintln!("TUI error: {}, falling back to simple mode", e);
                 let handle = SearchHandle::start(&prefix, num_threads);
                 handle.finish()
