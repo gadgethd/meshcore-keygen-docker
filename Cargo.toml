@@ -3,6 +3,7 @@ name = "mc-keygen"
 version = "0.1.0"
 edition = "2021"
 description = "MeshCore vanity Ed25519 key generator"
+license = "MIT OR Apache-2.0"
 
 [features]
 default = []

@@ -1,7 +1,19 @@
 // ============================================================================
 // vanity_kernel.cu - Ed25519 vanity key generation kernel
-// Field arithmetic and point operations from solana-perf-libs (ref10/orlp)
-// SHA-512 and vanity search logic custom
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//
+// Ed25519 field arithmetic (fe_*) and group operations (ge_*) are derived
+// from solana-perf-libs (https://github.com/solana-labs/solana-perf-libs),
+// which adapted the SUPERCOP ref10 implementation. That code is covered by:
+//
+//   Copyright (c) 2015 Orson Peters <orsonpeters@gmail.com>
+//   Zlib license (see cuda/THIRD-PARTY-NOTICES for full text)
+//
+//   Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
+//   BSD 3-Clause license (see cuda/THIRD-PARTY-NOTICES for full text)
+//
+// This is an altered source version adapted for NVRTC single-file
+// compilation. SHA-512 and vanity search kernels are original work.
 // ============================================================================
 
 // NVRTC doesn't have stdint.h, define types inline
