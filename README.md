@@ -5,7 +5,7 @@ Vanity Ed25519 key generator for [MeshCore](https://github.com/ripplebiz/MeshCor
 ## Usage
 
 ```
-mc-keygen <PREFIX> [OPTIONS]
+mc-keygen <PREFIX>... [OPTIONS]
 ```
 
 **Options:**
@@ -17,10 +17,16 @@ mc-keygen <PREFIX> [OPTIONS]
 **Examples:**
 ```bash
 mc-keygen AB             # find a key starting with AB
+mc-keygen AB CD EF       # find a key matching ANY of these prefixes
 mc-keygen DEAD -t 4      # use 4 threads
 mc-keygen AB --json      # machine-readable output
 mc-keygen ABCDEF --gpu   # use GPU for longer prefixes
+mc-keygen AB CD --gpu    # multi-prefix GPU search
 ```
+
+### Multiple prefixes
+
+You can pass multiple prefixes in a single invocation. Every generated key is checked against all of them, so searching for N prefixes at once is ~N times more efficient than running N separate searches. The JSON output includes a `matched_prefix` field indicating which prefix was found.
 
 Prefix length determines difficulty — each hex char multiplies expected attempts by 16:
 
@@ -45,6 +51,30 @@ Measured throughput on real hardware:
 | **GPU** | ~68M keys/sec | NVIDIA RTX 4090 (24GB) |
 
 The GPU is roughly **50x faster** than the CPU on this hardware. The speedup comes from running the full Ed25519 pipeline (SHA-512, scalar multiply, point compress, prefix check) across thousands of GPU threads in parallel.
+
+## Benchmarks
+
+Run with `cargo bench`:
+
+**Prefix matching overhead** — isolated prefix check cost per key:
+
+| Prefixes | Time per check |
+|----------|---------------|
+| 1        | ~0.5 ns       |
+| 5        | ~2.4 ns       |
+| 10       | ~4.7 ns       |
+
+**Full keygen + match pipeline** — end-to-end per-key cost (single thread):
+
+| Prefixes | Time per key | Throughput |
+|----------|-------------|------------|
+| 0 (keygen only) | 12.5 µs | 80K keys/s |
+| 1        | 12.5 µs     | 80K keys/s |
+| 5        | 12.2 µs     | 82K keys/s |
+| 10       | 12.2 µs     | 82K keys/s |
+| 20       | 12.2 µs     | 82K keys/s |
+
+Multi-prefix matching adds **no measurable overhead** — the prefix check (~5 ns for 10 prefixes) is dwarfed by the Ed25519 scalar multiplication (~12.5 µs). Measured on AMD Ryzen 9 7950X3D.
 
 ## Building
 

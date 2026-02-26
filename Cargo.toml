@@ -21,6 +21,17 @@ ratatui = "0.29"
 crossterm = "0.28"
 cudarc = { version = "0.19", optional = true, features = ["cuda-13010"] }
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "prefix_match"
+harness = false
+
+[[bench]]
+name = "keygen_search"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
