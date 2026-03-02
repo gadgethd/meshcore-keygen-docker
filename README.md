@@ -63,7 +63,7 @@ Keys starting with `00` or `FF` are skipped (reserved by MeshCore).
 ## Sources
 
 - [MeshCore](https://github.com/ripplebiz/MeshCore) — the mesh networking firmware these keys are for
-- [MeshCore mc-keygen web tool](https://github.com/ripplebiz/MeshCore/blob/main/variants/MeshCore_nRF52_USB_Dongle/companion_app/mc-keygen.html) — reference implementation of the key generation algorithm
+- [MeshCore mc-keygen web tool](https://gessaman.com/mc-keygen/) — reference implementation of the key generation algorithm
 - [Ed25519 / RFC 8032](https://datatracker.ietf.org/doc/html/rfc8032) — the signature scheme spec
 - [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek) — Rust Ed25519 elliptic curve library
 - [ratatui](https://github.com/ratatui/ratatui) — TUI framework for the progress display
