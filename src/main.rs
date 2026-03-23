@@ -317,6 +317,17 @@ fn print_colored_result(result: &types::SearchResult) {
         "{}",
         style::style(&result.private_key).white()
     );
+
+    if let Some(seed) = &result.seed {
+        eprint!(
+            "{}",
+            style::style("Seed:        ").dim()
+        );
+        eprintln!(
+            "{}",
+            style::style(seed).white()
+        );
+    }
 }
 
 fn print_colored_error(msg: &str) {

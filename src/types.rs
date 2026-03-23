@@ -16,6 +16,7 @@ pub struct SearchResult {
     pub matched_prefix: String,
     pub attempts: u64,
     pub elapsed_secs: f64,
+    pub seed: Option<String>,
 }
 
 /// Error returned when a search completes without finding a match

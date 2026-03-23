@@ -106,8 +106,8 @@ fn should_skip(public_key: &[u8; 32]) -> bool {
 struct MatchResult {
     keypair: MeshCoreKeypair,
     matched_prefix: String,
+    seed: Option<String>,
 }
-
 /// Handle for a running vanity key search.
 /// Exposes atomics so a TUI render loop can poll progress directly.
 pub struct SearchHandle {
@@ -162,6 +162,7 @@ impl SearchHandle {
                         *result.lock().unwrap() = Some(MatchResult {
                             keypair: kp,
                             matched_prefix: matched.0.clone(),
+                            seed: Some(hex::encode(seed).to_uppercase()),
                         });
                         return;
                     }
@@ -218,6 +219,7 @@ impl SearchHandle {
                 matched_prefix: m.matched_prefix,
                 attempts,
                 elapsed_secs: elapsed,
+                seed: m.seed,
             }),
             None => Err(SearchError {
                 attempts,
@@ -311,6 +313,7 @@ impl SearchHandle {
                         *result.lock().unwrap() = Some(MatchResult {
                             keypair: kp,
                             matched_prefix: matched.0.clone(),
+                            seed: Some(hex::encode_upper(seed)),
                         });
                         return;
                     }
@@ -368,6 +371,7 @@ fn gpu_dispatch_loop(
                     *result.lock().unwrap() = Some(MatchResult {
                         keypair: kp,
                         matched_prefix,
+                        seed: None,
                     });
                     return;
                 }
