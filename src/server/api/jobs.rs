@@ -153,7 +153,7 @@ async fn update(
 }
 
 async fn delete(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
     crate::server::db::delete_job(&db, &id).ok();
     StatusCode::NO_CONTENT
 }

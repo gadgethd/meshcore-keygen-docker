@@ -1,30 +1,47 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { api, SettingsData } from '../api';
 
 export default function Settings() {
   const [s, setS] = useState<SettingsData | null>(null);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+  const savedTimer = useRef<ReturnType<typeof setTimeout>>();
+  const debounceTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  useEffect(() => { api.settings().then(setS).catch(() => {}); }, []);
+  useEffect(() => { api.settings().then(setS).catch(() => setError('Failed to load settings')); }, []);
 
-  const update = async (key: string, value: any) => {
+  const update = useCallback(async (key: string, value: unknown) => {
     if (!s) return;
+    const prev = { ...s };
     const next = { ...s, [key]: value };
     setS(next);
-    await api.updateSettings({ [key]: value });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  };
+    setSaved(false);
 
-  if (!s) return <div>Loading...</div>;
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    debounceTimer.current = setTimeout(async () => {
+      try {
+        await api.updateSettings({ [key]: value });
+        setError('');
+        setSaved(true);
+        if (savedTimer.current) clearTimeout(savedTimer.current);
+        savedTimer.current = setTimeout(() => setSaved(false), 2000);
+      } catch (e: any) {
+        setS(prev); // rollback
+        setError(`Save failed: ${e.message}`);
+      }
+    }, 500);
+  }, [s]);
+
+  if (!s) return <div style={{ color: error ? '#f85149' : '#8b949e' }}>{error || 'Loading...'}</div>;
 
   return (
     <div>
       <h2 style={{ marginBottom: 16 }}>Settings</h2>
       {saved && <div style={{ color: '#238636', marginBottom: 12 }}>Saved</div>}
+      {error && <div style={{ color: '#f85149', marginBottom: 12 }}>{error}</div>}
       <div className="card" style={{ maxWidth: 500 }}>
         <Field label="Reserved CPU Cores" value={s.reserved_cpu_cores} onChange={v => update('reserved_cpu_cores', Number(v))} type="number" />
-        <Field label="Max Worker Threads" value={s.max_worker_threads ?? ''} onChange={v => update('max_worker_threads', v ? Number(v) : null)} type="number" />
+        <Field label="Max Worker Thread" value={s.max_worker_threads ?? ''} onChange={v => update('max_worker_threads', v ? Number(v) : null)} type="number" />
         <Field label="Checkpoint Interval (s)" value={s.checkpoint_interval_secs} onChange={v => update('checkpoint_interval_secs', Number(v))} type="number" />
         <Field label="Default Backend" value={s.default_backend} onChange={v => update('default_backend', v)} />
         <Field label="Timezone" value={s.timezone} onChange={v => update('timezone', v)} />

@@ -35,7 +35,7 @@ async fn list(State(state): State<Arc<AppState>>) -> Result<Json<Vec<ResultRecor
 }
 
 async fn delete_result(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
     crate::server::db::delete_result(&db, &id).ok();
     StatusCode::NO_CONTENT
 }

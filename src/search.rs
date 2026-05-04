@@ -354,7 +354,15 @@ impl SearchHandle {
     }
 
     /// Save a checkpoint of the current search state.
-    pub fn save_checkpoint(&self, job_id: &str, backend: &str, device: &str) -> Result<(), String> {
+    pub fn save_checkpoint(
+        &self,
+        job_id: &str,
+        prefixes: &[String],
+        backend: &str,
+        device: &str,
+        cpu_worker_threads: usize,
+        cpu_reserved_cores: usize,
+    ) -> Result<(), String> {
         let path = self
             .checkpoint_path
             .clone()
@@ -362,7 +370,15 @@ impl SearchHandle {
         let state = self
             .get_deterministic_state()
             .ok_or("no deterministic state".to_string())?;
-        let ckpt = Checkpoint::new(job_id, &[], &state, backend, device, 0, 1);
+        let ckpt = Checkpoint::new(
+            job_id,
+            prefixes,
+            &state,
+            backend,
+            device,
+            cpu_worker_threads,
+            cpu_reserved_cores,
+        );
         ckpt.save(&path)
     }
 

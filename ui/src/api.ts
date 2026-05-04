@@ -1,13 +1,24 @@
 const BASE = '/api';
+const TIMEOUT = 15000;
 
 async function req<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + url, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  if (res.status === 204) return undefined as T;
-  return res.json();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT);
+  try {
+    const res = await fetch(BASE + url, {
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...(options?.headers as Record<string,string> || {}) },
+      ...options,
+    });
+    if (res.status === 204) return undefined as T;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(body || `${res.status} ${res.statusText}`);
+    }
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface Job {

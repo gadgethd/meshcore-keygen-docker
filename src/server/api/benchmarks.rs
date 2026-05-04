@@ -86,13 +86,13 @@ async fn delete_benchmark(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
     crate::server::db::delete_benchmark(&db, &id).ok();
     StatusCode::NO_CONTENT
 }
 
 async fn set_default(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
-    let db = state.db.lock().unwrap();
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
     crate::server::db::set_default_benchmark(&db, &id).ok();
     StatusCode::NO_CONTENT
 }

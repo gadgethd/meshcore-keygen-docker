@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
@@ -6,8 +6,11 @@ use uuid::Uuid;
 
 use crate::deterministic::DeterministicState;
 use crate::search::SearchHandle;
-use crate::server::db::DbPool;
-use crate::server::models::{Job, JobStatus, ResultRecord};
+use crate::server::db::{self as dbmod};
+use crate::server::models::{JobStatus, ResultRecord};
+
+/// Alias for the database pool type used by the queue manager.
+type DbPool = Arc<Mutex<rusqlite::Connection>>;
 
 pub struct QueueManager {
     db: DbPool,
@@ -32,8 +35,8 @@ impl QueueManager {
             }
 
             let next_job = {
-                let db = self.db.lock().unwrap();
-                crate::server::db::get_next_queued_job(&db).ok().flatten()
+                let db = lock_db(&self.db);
+                dbmod::get_next_queued_job(&db).ok().flatten()
             };
 
             if let Some(job) = next_job {
@@ -45,46 +48,65 @@ impl QueueManager {
                 let job_id = job.id.clone();
                 let prefixes = job.prefixes.clone();
                 let backend = job.backend.clone();
+                let max_attempts = job.max_attempts;
+                let max_runtime = job.max_runtime;
 
                 tokio::task::spawn_blocking(move || {
-                    run_job_in_thread(db, running, job_id, prefixes, backend);
+                    run_job_sync(
+                        db,
+                        running,
+                        job_id,
+                        prefixes,
+                        backend,
+                        max_attempts,
+                        max_runtime,
+                    );
                 });
             }
         }
     }
 }
 
-fn run_job_in_thread(
+/// Lock the DB, recovering from poison.
+fn lock_db(db: &DbPool) -> std::sync::MutexGuard<rusqlite::Connection> {
+    db.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn run_job_sync(
     db: DbPool,
     running: Arc<TokioMutex<bool>>,
     job_id: String,
     prefixes: Vec<String>,
     _backend: String,
+    max_attempts: Option<u64>,
+    max_runtime: Option<u64>,
 ) {
-    // Mark job as running
+    // Ensure running lock is always released
+    let _release = RunningGuard {
+        running: running.clone(),
+    };
+
+    // Mark as running
     {
-        let db = db.lock().unwrap();
-        if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
-            job.status = JobStatus::Running;
-            let _ = crate::server::db::update_job(&db, &job);
+        let db = lock_db(&db);
+        if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+            j.status = JobStatus::Running;
+            let _ = dbmod::update_job(&db, &j);
         }
     }
 
-    // Create deterministic state
+    // Create state and store master seed
     let deterministic_state = DeterministicState::new();
     let master_seed_hex = deterministic_state.master_seed_hex();
-
-    // Store master seed on job
     {
-        let db = db.lock().unwrap();
-        if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
-            job.master_seed = Some(master_seed_hex.clone());
-            let _ = crate::server::db::update_job(&db, &job);
+        let db = lock_db(&db);
+        if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+            j.master_seed = Some(master_seed_hex);
+            let _ = dbmod::update_job(&db, &j);
         }
     }
 
-    // Checkpoint path
-    std::fs::create_dir_all("/data/checkpoints").ok();
+    let _ = std::fs::create_dir_all("/data/checkpoints");
     let checkpoint_path = Some(std::path::PathBuf::from(format!(
         "/data/checkpoints/{}.json",
         job_id
@@ -104,88 +126,111 @@ fn run_job_in_thread(
     );
 
     let start = Instant::now();
-    let mut last_progress_update = Instant::now();
+    let mut last_update = Instant::now();
 
-    // Poll for results with progress updates
     loop {
         if handle.is_done() {
             break;
         }
+        if let Some(limit) = max_attempts {
+            if handle.stats(0).attempts >= limit {
+                break;
+            }
+        }
+        if let Some(limit) = max_runtime {
+            if start.elapsed().as_secs() >= limit {
+                break;
+            }
+        }
 
         std::thread::sleep(Duration::from_millis(200));
 
-        // Update progress every 2 seconds
-        if last_progress_update.elapsed() >= Duration::from_secs(2) {
-            last_progress_update = Instant::now();
-            if let Ok(db) = db.lock() {
-                if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
-                    let stats = handle.stats(0);
-                    job.attempts_done = stats.attempts;
-                    job.keys_per_second = stats.keys_per_sec;
-                    job.elapsed_seconds = stats.elapsed_secs;
-                    if let Some(state) = handle.get_deterministic_state() {
-                        job.next_counter = Some(state.counter);
-                    }
-                    let _ = crate::server::db::update_job(&db, &job);
+        if last_update.elapsed() >= Duration::from_secs(2) {
+            last_update = Instant::now();
+            let db = lock_db(&db);
+            if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+                let stats = handle.stats(0);
+                j.attempts_done = stats.attempts;
+                j.keys_per_second = stats.keys_per_sec;
+                j.elapsed_seconds = stats.elapsed_secs;
+                if let Some(s) = handle.get_deterministic_state() {
+                    j.next_counter = Some(s.counter);
                 }
+                let _ = dbmod::update_job(&db, &j);
             }
         }
     }
 
     let elapsed = start.elapsed();
     let stats = handle.stats(0);
+    let found = handle.is_done();
 
-    match handle.finish() {
-        Ok(result) => {
-            // Save result
-            let db = db.lock().unwrap();
-            let result_record = ResultRecord {
-                id: Uuid::new_v4().to_string(),
-                job_id: job_id.clone(),
-                prefix: result.matched_prefix,
-                public_key: result.public_key,
-                private_key: result.private_key,
-                candidate_seed: result.seed,
-                master_seed: result.master_seed,
-                counter: result.counter,
-                attempts: result.attempts,
-                elapsed_seconds: result.elapsed_secs,
-                keys_per_second: if result.elapsed_secs > 0.0 {
-                    result.attempts as f64 / result.elapsed_secs
-                } else {
-                    0.0
-                },
-                backend: "cpu".to_string(),
-                device: String::new(),
-                created_at: chrono_now(),
-            };
-            let _ = crate::server::db::insert_result(&db, &result_record);
-
-            // Mark job completed
-            if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
-                job.status = JobStatus::Completed;
-                job.attempts_done = stats.attempts;
-                job.keys_per_second = stats.keys_per_sec;
-                job.elapsed_seconds = elapsed.as_secs_f64();
-                let _ = crate::server::db::update_job(&db, &job);
+    if found {
+        match handle.finish() {
+            Ok(result) => {
+                let db = lock_db(&db);
+                let record = ResultRecord {
+                    id: Uuid::new_v4().to_string(),
+                    job_id: job_id.clone(),
+                    prefix: result.matched_prefix.clone(),
+                    public_key: result.public_key.clone(),
+                    private_key: result.private_key.clone(),
+                    candidate_seed: result.seed.clone(),
+                    master_seed: result.master_seed.clone(),
+                    counter: result.counter,
+                    attempts: result.attempts,
+                    elapsed_seconds: result.elapsed_secs,
+                    keys_per_second: if result.elapsed_secs > 0.0 {
+                        result.attempts as f64 / result.elapsed_secs
+                    } else {
+                        0.0
+                    },
+                    backend: "cpu".to_string(),
+                    device: String::new(),
+                    created_at: chrono_now(),
+                };
+                let _ = dbmod::insert_result(&db, &record);
+                if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+                    j.status = JobStatus::Completed;
+                    j.attempts_done = stats.attempts;
+                    j.keys_per_second = stats.keys_per_sec;
+                    j.elapsed_seconds = elapsed.as_secs_f64();
+                    let _ = dbmod::update_job(&db, &j);
+                }
+            }
+            Err(e) => {
+                let db = lock_db(&db);
+                if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+                    j.status = JobStatus::Failed;
+                    j.notes = Some(format!("Search error: {}", e));
+                    let _ = dbmod::update_job(&db, &j);
+                }
             }
         }
-        Err(e) => {
-            let db = db.lock().unwrap();
-            if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
-                job.status = JobStatus::Failed;
-                job.notes = Some(format!("Search error: {}", e));
-                let _ = crate::server::db::update_job(&db, &job);
+    } else {
+        let db = lock_db(&db);
+        if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+            j.status = JobStatus::Stopped;
+            j.attempts_done = stats.attempts;
+            j.keys_per_second = stats.keys_per_sec;
+            j.elapsed_seconds = elapsed.as_secs_f64();
+            let mut reasons = Vec::new();
+            if let Some(limit) = max_attempts {
+                if stats.attempts >= limit {
+                    reasons.push(format!("reached max_attempts ({})", limit));
+                }
             }
+            if let Some(limit) = max_runtime {
+                if elapsed.as_secs() >= limit {
+                    reasons.push(format!("reached max_runtime ({}s)", limit));
+                }
+            }
+            if !reasons.is_empty() {
+                j.notes = Some(reasons.join(", "));
+            }
+            let _ = dbmod::update_job(&db, &j);
         }
     }
-
-    // Release the running lock
-    let rt = tokio::runtime::Handle::current();
-    rt.block_on(async {
-        let mut r = running.lock().await;
-        *r = false;
-    });
 }
 
 fn chrono_now() -> String {
@@ -193,4 +238,20 @@ fn chrono_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_default()
+}
+
+struct RunningGuard {
+    running: Arc<TokioMutex<bool>>,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        let rt = tokio::runtime::Handle::try_current();
+        if let Ok(rt) = rt {
+            rt.block_on(async {
+                let mut r = self.running.lock().await;
+                *r = false;
+            });
+        }
+    }
 }

@@ -55,9 +55,6 @@ async fn update_settings(
     }
     if let Some(v) = req.max_worker_threads {
         crate::server::db::save_setting(&db, "max_worker_threads", &v.to_string()).ok();
-    } else if req.max_worker_threads.is_some() {
-        // Allow clearing
-        crate::server::db::save_setting(&db, "max_worker_threads", "").ok();
     }
     if let Some(v) = req.checkpoint_interval_secs {
         crate::server::db::save_setting(&db, "checkpoint_interval_secs", &v.to_string()).ok();

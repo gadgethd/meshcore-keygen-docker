@@ -1,19 +1,31 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { api, Result } from '../api';
 
 export default function Results() {
   const [results, setResults] = useState<Result[]>([]);
+  const [loading, setLoading] = useState(true);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
-  useEffect(() => { api.results().then(setResults).catch(() => {}); }, []);
+
+  useEffect(() => {
+    const load = () => api.results().then(r => { setResults(r); setLoading(false); }).catch(() => {});
+    load();
+    const i = setInterval(load, 5000);
+    return () => clearInterval(i);
+  }, []);
 
   const toggle = (id: string) => {
-    setRevealed(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+    setRevealed(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
   };
 
   return (
     <div>
       <h2 style={{ marginBottom: 16 }}>Results</h2>
-      {results.length === 0 && <div style={{ color: '#8b949e' }}>No results yet.</div>}
+      {loading && results.length === 0 && <div style={{ color: '#8b949e' }}>Loading...</div>}
+      {!loading && results.length === 0 && <div style={{ color: '#8b949e' }}>No results yet.</div>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {results.map(r => (
           <div key={r.id} className="card">

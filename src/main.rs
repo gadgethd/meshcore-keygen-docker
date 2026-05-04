@@ -593,7 +593,10 @@ fn main() {
     // Expected attempts: use shortest prefix length, divided by count of same-length prefixes
     let min_len = prefixes.iter().map(|p| p.len()).min().unwrap();
     let same_len_count = prefixes.iter().filter(|p| p.len() == min_len).count() as u64;
-    let expected = 16u64.pow(min_len as u32) / same_len_count;
+    let expected = match 16u64.checked_pow(min_len as u32) {
+        Some(v) => v / same_len_count.max(1),
+        None => u64::MAX, // overflow for very long prefixes; use max as placeholder
+    };
 
     let prefix_count_label = if prefixes.len() == 1 {
         String::new()

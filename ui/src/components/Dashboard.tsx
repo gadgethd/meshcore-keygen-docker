@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { api, SystemStatus } from '../api';
 
 function fmt(n: number): string {
@@ -17,15 +17,23 @@ function fmtDur(s: number): string {
 export default function Dashboard() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [error, setError] = useState('');
+  const mountedRef = useRef(true);
+  const intervalRef = useRef<ReturnType<typeof setInterval>>();
 
   useEffect(() => {
-    api.status().then(setStatus).catch(e => setError(e.message));
-    const i = setInterval(() => api.status().then(setStatus).catch(() => {}), 2000);
-    return () => clearInterval(i);
+    mountedRef.current = true;
+    const poll = () => {
+      api.status()
+        .then(s => { if (mountedRef.current) { setStatus(s); setError(''); } })
+        .catch(e => { if (mountedRef.current) setError(e.message); });
+    };
+    poll();
+    intervalRef.current = setInterval(poll, 2000);
+    return () => { mountedRef.current = false; clearInterval(intervalRef.current); };
   }, []);
 
-  if (error) return <div style={{ color: '#f85149' }}>Error: {error}</div>;
-  if (!status) return <div>Loading...</div>;
+  if (error && !status) return <div style={{ color: '#f85149' }}>Error: {error}</div>;
+  if (!status) return <div style={{ color: '#8b949e' }}>Loading...</div>;
 
   const job = status.active_job;
   const pct = job && job.max_attempts ? Math.min(100, (job.attempts_done / job.max_attempts * 100)) : 0;
@@ -33,6 +41,7 @@ export default function Dashboard() {
   return (
     <div>
       <h2 style={{ marginBottom: 16 }}>Dashboard</h2>
+      {error && <div style={{ color: '#f85149', fontSize: 12, marginBottom: 12 }}>{error} (retrying...)</div>}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
         <Card title="Active Job" value={job ? job.prefixes.join(', ') : 'None'} />
         <Card title="Queue" value={String(status.queue_length)} />
@@ -41,7 +50,6 @@ export default function Dashboard() {
         <Card title="GPU" value={status.gpu_available ? 'Available' : 'None'} />
         <Card title="Benchmark" value={status.last_benchmark_keys_per_second ? fmt(status.last_benchmark_keys_per_second) + ' k/s' : 'None'} />
       </div>
-
       {job && (
         <div className="card" style={{ marginTop: 16 }}>
           <h3 style={{ marginBottom: 12 }}>Active Job: {job.prefixes.join(', ')}</h3>

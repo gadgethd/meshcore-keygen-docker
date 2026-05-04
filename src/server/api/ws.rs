@@ -47,11 +47,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 }
 
 fn get_status_update(state: &AppState) -> serde_json::Value {
-    let db = state.db.lock().ok();
-    let jobs = db
-        .as_ref()
-        .and_then(|db| crate::server::db::list_jobs(db).ok())
-        .unwrap_or_default();
+    let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
+    let jobs = crate::server::db::list_jobs(&db).unwrap_or_default();
     let active_job = jobs
         .iter()
         .find(|j| j.status == crate::server::models::JobStatus::Running);
@@ -60,10 +57,7 @@ fn get_status_update(state: &AppState) -> serde_json::Value {
         .filter(|j| j.status == crate::server::models::JobStatus::Queued)
         .count();
     let cfg = crate::cpu::CpuConfig::detect();
-    let last_bm = db
-        .as_ref()
-        .and_then(|db| crate::server::db::get_default_benchmark(db).ok())
-        .flatten();
+    let last_bm = crate::server::db::get_default_benchmark(&db).ok().flatten();
 
     serde_json::json!({
         "type": "status_update",

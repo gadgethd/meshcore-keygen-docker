@@ -7,8 +7,15 @@ services:
     image: meshcore-keygen-dev:latest
     working_dir: /build
     volumes:
-      - .:/build
+      - ./src:/build/src
+      - ./cuda:/build/cuda
+      - ./metal:/build/metal
+      - ./benches:/build/benches
+      - ./ui:/build/ui
+      - ./Cargo.toml:/build/Cargo.toml
+      - ./Cargo.lock:/build/Cargo.lock
       - cargo-cache:/usr/local/cargo/registry
+      - cargo-target:/build/target
     environment:
       - RUST_LOG=debug
     deploy:
@@ -18,7 +25,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: ["cargo", "test"]
+    command: ["cargo", "test", "--features", "cuda,server"]
 
 volumes:
   cargo-cache:
+  cargo-target:

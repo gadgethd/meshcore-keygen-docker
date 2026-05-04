@@ -505,28 +505,27 @@ pub fn insert_log(conn: &Connection, entry: &LogEntry) -> Result<()> {
 }
 
 pub fn list_logs(conn: &Connection, limit: usize, job_id: Option<&str>) -> Result<Vec<LogEntry>> {
-    let query = if let Some(jid) = job_id {
-        format!(
-            "SELECT id, timestamp, level, job_id, message FROM logs WHERE job_id = '{}' ORDER BY id DESC LIMIT {}",
-            jid.replace('\'', "''"), limit
-        )
+    if let Some(jid) = job_id {
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, level, job_id, message FROM logs WHERE job_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![jid, limit as i64], |row| row_to_log_entry(row))?;
+        rows.collect::<Result<Vec<_>>>()
     } else {
-        format!(
-            "SELECT id, timestamp, level, job_id, message FROM logs ORDER BY id DESC LIMIT {}",
-            limit
-        )
-    };
-    let mut stmt = conn.prepare(&query)?;
-    let entries = stmt
-        .query_map([], |row| {
-            Ok(LogEntry {
-                id: row.get(0)?,
-                timestamp: row.get(1)?,
-                level: row.get(2)?,
-                job_id: row.get(3)?,
-                message: row.get(4)?,
-            })
-        })?
-        .collect::<Result<Vec<_>>>()?;
-    Ok(entries)
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, level, job_id, message FROM logs ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| row_to_log_entry(row))?;
+        rows.collect::<Result<Vec<_>>>()
+    }
+}
+
+fn row_to_log_entry(row: &rusqlite::Row) -> rusqlite::Result<LogEntry> {
+    Ok(LogEntry {
+        id: row.get(0)?,
+        timestamp: row.get(1)?,
+        level: row.get(2)?,
+        job_id: row.get(3)?,
+        message: row.get(4)?,
+    })
 }

@@ -1,20 +1,37 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { api, Job } from '../api';
 
 export default function Queue() {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const mountedRef = useRef(true);
 
-  const load = () => api.jobs().then(setJobs).catch(e => setError(e.message));
-  useEffect(() => { load(); const i = setInterval(load, 3000); return () => clearInterval(i); }, []);
+  const load = () => {
+    api.jobs()
+      .then(j => { if (mountedRef.current) { setJobs(j); setError(''); setLoading(false); } })
+      .catch(e => { if (mountedRef.current) setError(e.message); });
+  };
 
-  const act = async (fn: () => Promise<any>) => { try { await fn(); load(); } catch (e: any) { setError(e.message); } };
+  useEffect(() => {
+    mountedRef.current = true;
+    load();
+    const i = setInterval(load, 3000);
+    return () => { mountedRef.current = false; clearInterval(i); };
+  }, []);
+
+  const act = async (fn: () => Promise<any>) => {
+    setError('');
+    try { await fn(); load(); } catch (e: any) { setError(e.message); }
+  };
 
   return (
     <div>
       <h2 style={{ marginBottom: 16 }}>Queue</h2>
       {error && <div style={{ color: '#f85149', marginBottom: 12 }}>{error}</div>}
-      {jobs.length === 0 && <div style={{ color: '#8b949e' }}>No jobs yet. <a href="/new">Create one</a></div>}
+      {loading && jobs.length === 0 && <div style={{ color: '#8b949e' }}>Loading...</div>}
+      {!loading && jobs.length === 0 && <div style={{ color: '#8b949e' }}>No jobs yet. <Link to="/new">Create one</Link></div>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {jobs.map(job => (
           <div key={job.id} className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

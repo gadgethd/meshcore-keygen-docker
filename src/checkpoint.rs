@@ -71,8 +71,9 @@ impl Checkpoint {
     }
 
     /// Serialize to JSON.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| format!("checkpoint serialization failed: {}", e))
     }
 
     /// Deserialize from JSON.
@@ -83,7 +84,7 @@ impl Checkpoint {
     /// Write checkpoint atomically: write to .tmp, fsync, rename.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let tmp = path.with_extension("tmp");
-        let json = self.to_json();
+        let json = self.to_json()?;
 
         let mut file =
             fs::File::create(&tmp).map_err(|e| format!("failed to create checkpoint: {}", e))?;
@@ -149,7 +150,7 @@ mod tests {
             1,
         );
 
-        let json = ckpt.to_json();
+        let json = ckpt.to_json().unwrap();
         let restored = Checkpoint::from_json(&json).unwrap();
 
         assert_eq!(restored.job_id, "test-job-1");
