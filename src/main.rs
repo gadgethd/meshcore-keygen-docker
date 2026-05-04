@@ -29,7 +29,7 @@ use search::SearchHandle;
     about = "MeshCore vanity Ed25519 key generator"
 )]
 struct Cli {
-    /// Hex prefix(es) to search for (1-8 chars, 0-9/A-F each)
+    /// Hex prefix(es) to search for (1-64 chars, 0-9/A-F each)
     #[arg(required = true)]
     prefix: Vec<String>,
 
@@ -60,11 +60,21 @@ struct Cli {
 fn validate_prefix(prefix: &str) -> Result<String, String> {
     let upper = prefix.to_ascii_uppercase();
 
-    if upper.is_empty() || upper.len() > 8 {
+    if upper.is_empty() || upper.len() > 64 {
         return Err(format!(
-            "prefix must be 1-8 hex characters, got {} characters",
+            "prefix must be 1-64 hex characters, got {} characters",
             upper.len()
         ));
+    }
+
+    if upper.len() > 8 {
+        let expected_f64 = 16_f64.powf(upper.len() as f64);
+        eprintln!(
+            "Warning: prefix length {} is computationally expensive. \
+             Expected ~{:.2e} attempts on average.",
+            upper.len(),
+            expected_f64,
+        );
     }
 
     if !upper.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -486,5 +496,70 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn valid_short_prefix() {
+        assert!(validate_prefix("AB").is_ok());
+        assert!(validate_prefix("C0DE").is_ok());
+        assert!(validate_prefix("1A2B3C4D").is_ok());
+    }
+
+    #[test]
+    fn valid_long_prefix() {
+        // 9 chars (e.g. C0DEBA5ED)
+        assert!(validate_prefix("C0DEBA5ED").is_ok());
+        // 16 chars
+        assert!(validate_prefix("C0DEBA5EDC0DEBA5E").is_ok());
+        // 64 chars
+        assert!(validate_prefix(&"A".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn rejects_too_long_prefix() {
+        assert!(validate_prefix(&"A".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_prefix() {
+        assert!(validate_prefix("").is_err());
+    }
+
+    #[test]
+    fn rejects_non_hex_prefix() {
+        assert!(validate_prefix("GH").is_err());
+        assert!(validate_prefix("ZZZZ").is_err());
+        assert!(validate_prefix("0xBE").is_err());
+    }
+
+    #[test]
+    fn rejects_00_prefix() {
+        assert!(validate_prefix("00").is_err());
+        assert!(validate_prefix("00AB").is_err());
+    }
+
+    #[test]
+    fn rejects_ff_prefix() {
+        assert!(validate_prefix("FF").is_err());
+        assert!(validate_prefix("FFAB").is_err());
+    }
+
+    #[test]
+    fn case_insensitive_accept() {
+        assert!(validate_prefix("ab").is_ok());
+        assert!(validate_prefix("deadbeef").is_ok());
+        assert!(validate_prefix("C0deBa5ed").is_ok());
+    }
+
+    #[test]
+    fn single_char_prefix_ok() {
+        assert!(validate_prefix("A").is_ok());
+        assert!(validate_prefix("0").is_ok());
+        assert!(validate_prefix("F").is_ok());
     }
 }
