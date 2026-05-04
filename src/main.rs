@@ -8,6 +8,10 @@ mod keygen;
 mod metal_gpu;
 mod search;
 mod types;
+#[cfg(feature = "server")]
+mod server {
+    pub use mc_keygen::server::*;
+}
 
 use std::io::{self, stdout};
 use std::time::Duration;
@@ -102,6 +106,11 @@ struct Cli {
     /// Maximum runtime in seconds
     #[arg(long)]
     max_runtime: Option<u64>,
+
+    /// Start web server (requires 'server' feature)
+    #[cfg(feature = "server")]
+    #[arg(long)]
+    serve: bool,
 }
 
 fn validate_prefix(prefix: &str) -> Result<String, String> {
@@ -425,6 +434,21 @@ fn gpu_names_label(searchers: &[Box<dyn search::GpuSearcher>]) -> String {
 
 fn main() {
     let cli = Cli::parse();
+
+    // --serve mode: start the web server
+    #[cfg(feature = "server")]
+    if cli.serve {
+        let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "/data/app.db".to_string());
+        let bind = std::env::var("APP_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.block_on(async {
+            if let Err(e) = server::run(&bind, &db_path).await {
+                eprintln!("Server error: {}", e);
+                std::process::exit(1);
+            }
+        });
+        return;
+    }
 
     let mut prefixes = Vec::new();
     for raw in &cli.prefix {

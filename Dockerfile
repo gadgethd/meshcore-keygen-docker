@@ -32,8 +32,9 @@ RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
 # Copy source
 COPY . .
 
-# Build with CUDA support
-RUN cargo build --release --features cuda 2>&1 || \
+# Build with CUDA + server support
+RUN cargo build --release --features cuda,server 2>&1 || \
+    cargo build --release --features server 2>&1 || \
     cargo build --release 2>&1
 
 # --- Runtime stage ---
@@ -48,7 +49,7 @@ RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/s
 
 # Runtime deps: libssl, libsqlite3, CUDA runtime for nvrtc
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 libsqlite3-0 \
+    ca-certificates curl libssl3 libsqlite3-0 \
     cuda-cudart-12-6 cuda-nvrtc-12-6 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -69,3 +70,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/api/status || exit 1
 
 ENTRYPOINT ["/app/mc-keygen"]
+CMD ["--serve"]

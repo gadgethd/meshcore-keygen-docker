@@ -10,3 +10,6 @@ pub mod gpu;
 
 #[cfg(feature = "metal")]
 pub mod metal_gpu;
+
+#[cfg(feature = "server")]
+pub mod server;
