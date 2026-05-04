@@ -431,7 +431,7 @@ fn main() {
         match validate_prefix(raw) {
             Ok(p) => prefixes.push(p),
             Err(e) => {
-                if cli.json {
+                if cli.json || cli.json_progress {
                     eprintln!("Error: {}", e);
                 } else {
                     print_colored_error(&e);
@@ -441,11 +441,11 @@ fn main() {
         }
     }
 
-    let num_threads = cli.threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    });
+    // CPU config with reservation
+    let cpu_config = cpu::CpuConfig::detect();
+    let num_threads = cli
+        .threads
+        .unwrap_or_else(|| cpu_config.available_workers().max(1));
 
     // Expected attempts: use shortest prefix length, divided by count of same-length prefixes
     let min_len = prefixes.iter().map(|p| p.len()).min().unwrap();
@@ -487,6 +487,101 @@ fn main() {
         }
     }
 
+    // --- Deterministic mode ---
+    if cli.deterministic {
+        let mut state = if let Some(ref checkpoint_path) = cli.resume {
+            let path = std::path::PathBuf::from(checkpoint_path);
+            match checkpoint::Checkpoint::load(&path) {
+                Ok(ckpt) => {
+                    eprintln!("Loaded checkpoint from {}", checkpoint_path);
+                    ckpt.to_deterministic_state().unwrap_or_else(|e| {
+                        eprintln!("Warning: failed to restore state: {}", e);
+                        deterministic::DeterministicState::new()
+                    })
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load checkpoint ({}), starting fresh", e);
+                    deterministic::DeterministicState::new()
+                }
+            }
+        } else if let Some(ref hex) = cli.master_seed {
+            deterministic::DeterministicState::from_hex_seed(hex).unwrap_or_else(|e| {
+                eprintln!("Error: invalid master seed: {}", e);
+                std::process::exit(1);
+            })
+        } else {
+            eprintln!("Generating random master seed...");
+            deterministic::DeterministicState::new()
+        };
+
+        if let Some(counter) = cli.start_counter {
+            state.set_counter(counter);
+        }
+        if let Some(wid) = cli.worker_id {
+            state.worker_id = wid;
+        }
+
+        let checkpoint_path = cli.checkpoint.as_ref().map(std::path::PathBuf::from);
+        let handle = SearchHandle::start_deterministic(
+            &prefixes,
+            state,
+            num_threads,
+            checkpoint_path,
+            cli.checkpoint_interval,
+            cli.json_progress,
+        );
+
+        let mode_label = format!(
+            "deterministic, {} threads{}",
+            num_threads, prefix_count_label
+        );
+
+        if cli.json_progress {
+            // JSON progress mode: emit progress lines until done, then result
+            while !handle.is_done() {
+                if let Some(line) = handle.json_progress("cpu", "none") {
+                    println!("{}", line);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if let Some(line) = handle.json_result() {
+                println!("{}", line);
+            }
+            match handle.finish() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else if cli.json {
+            match handle.finish() {
+                Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            let search_result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("TUI error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            match search_result {
+                Ok(result) => print_colored_result(&result),
+                Err(e) => {
+                    print_colored_error(&format!("{}", e));
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
+
+    // --- Non-deterministic mode (original behavior) ---
     let gpu_searchers = if cpu_only {
         vec![]
     } else {
