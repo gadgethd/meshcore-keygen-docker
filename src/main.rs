@@ -1,3 +1,4 @@
+mod cpu;
 mod deterministic;
 #[cfg(feature = "cuda")]
 mod gpu;
