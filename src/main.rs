@@ -58,6 +58,50 @@ struct Cli {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     #[arg(long)]
     verify: bool,
+
+    /// Use deterministic seed+counter mode instead of random seeds
+    #[arg(long)]
+    deterministic: bool,
+
+    /// Master seed for deterministic mode (64 hex chars). Random if not provided.
+    #[arg(long, requires = "deterministic")]
+    master_seed: Option<String>,
+
+    /// Path to checkpoint file for save/resume
+    #[arg(long, requires = "deterministic")]
+    checkpoint: Option<String>,
+
+    /// Seconds between checkpoint saves (default: 10)
+    #[arg(long, default_value = "10", requires = "deterministic")]
+    checkpoint_interval: u64,
+
+    /// Resume from a checkpoint file
+    #[arg(long, requires = "deterministic")]
+    resume: Option<String>,
+
+    /// Emit JSON progress lines to stdout
+    #[arg(long)]
+    json_progress: bool,
+
+    /// Starting counter for deterministic mode
+    #[arg(long, requires = "deterministic")]
+    start_counter: Option<u64>,
+
+    /// Worker ID for multi-worker setups (default: 0)
+    #[arg(long, requires = "deterministic")]
+    worker_id: Option<u64>,
+
+    /// Total workers for chunk allocation (default: 1)
+    #[arg(long, requires = "deterministic")]
+    workers: Option<u64>,
+
+    /// Maximum attempts before stopping
+    #[arg(long)]
+    max_attempts: Option<u64>,
+
+    /// Maximum runtime in seconds
+    #[arg(long)]
+    max_runtime: Option<u64>,
 }
 
 fn validate_prefix(prefix: &str) -> Result<String, String> {
