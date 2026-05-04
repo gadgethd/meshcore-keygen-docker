@@ -1,3 +1,4 @@
+mod deterministic;
 #[cfg(feature = "cuda")]
 mod gpu;
 mod keygen;
