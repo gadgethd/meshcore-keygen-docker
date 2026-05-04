@@ -1,2 +1,43 @@
 /target
 .worktrees/
+
+# Docker volumes / runtime data
+/data/
+*.db
+*.sqlite
+*.sqlite3
+checkpoints/*
+results/*
+logs/*
+
+# Secrets
+*.key
+*.pem
+*.seed
+secrets.json
+.env
+.env.*
+.master_seed
+.candidate_seed
+
+# Generated / temp files
+*.tmp
+tmp/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.next/
+.svelte-kit/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

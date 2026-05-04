@@ -63,9 +63,7 @@ fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), CudaError> {
     let ptx = cudarc::nvrtc::compile_ptx_with_opts(
         KERNEL_SRC,
         cudarc::nvrtc::CompileOptions {
-            options: vec![
-                "--device-as-default-execution-space".into(),
-            ],
+            options: vec!["--device-as-default-execution-space".into()],
             ..Default::default()
         },
     )
@@ -91,7 +89,9 @@ impl CudaSearcher {
 
         let ctx = stream.context();
         let sm_count = ctx
-            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
             .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
         let grid_size = (sm_count as u32) * 2;
 

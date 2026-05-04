@@ -147,7 +147,7 @@ impl SearchHandle {
                     let kp = generate_keypair(&seed);
                     local_count += 1;
 
-                    if local_count % BATCH_SIZE == 0 {
+                    if local_count.is_multiple_of(BATCH_SIZE) {
                         total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
                     }
 
@@ -229,10 +229,7 @@ impl SearchHandle {
     }
 
     /// Start a GPU-only vanity key search. Spawns one thread per GPU device.
-    pub fn start_gpu(
-        prefixes: &[String],
-        gpu_searchers: Vec<Box<dyn GpuSearcher>>,
-    ) -> Self {
+    pub fn start_gpu(prefixes: &[String], gpu_searchers: Vec<Box<dyn GpuSearcher>>) -> Self {
         let matchers: Arc<Vec<(String, PrefixMatcher)>> = Arc::new(
             prefixes
                 .iter()
@@ -297,7 +294,7 @@ impl SearchHandle {
                     let kp = generate_keypair(&seed);
                     local_count += 1;
 
-                    if local_count % BATCH_SIZE == 0 {
+                    if local_count.is_multiple_of(BATCH_SIZE) {
                         total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
                     }
 
@@ -305,8 +302,7 @@ impl SearchHandle {
                         continue;
                     }
 
-                    if let Some(matched) =
-                        matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
+                    if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
                     {
                         total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
                         found.store(true, Ordering::Relaxed);

@@ -2,8 +2,7 @@ use std::ffi::c_void;
 use std::fmt;
 
 use metal::{
-    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions,
-    MTLSize,
+    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -112,7 +111,10 @@ impl MetalSearcher {
         })
     }
 
-    pub fn search_batch(&self, base_nonce: u64) -> Result<crate::search::GpuBatchResult, MetalError> {
+    pub fn search_batch(
+        &self,
+        base_nonce: u64,
+    ) -> Result<crate::search::GpuBatchResult, MetalError> {
         let keys_checked = self.grid_size * ITERS_PER_THREAD;
 
         // Zero the result buffer
@@ -233,8 +235,7 @@ pub fn verify_gpu_keygen() -> Result<(), MetalError> {
         seeds_flat.len() as u64,
         MTLResourceOptions::StorageModeShared,
     );
-    let pubkeys_buf =
-        device.new_buffer((count as u64) * 32, MTLResourceOptions::StorageModeShared);
+    let pubkeys_buf = device.new_buffer((count as u64) * 32, MTLResourceOptions::StorageModeShared);
     let privkeys_buf =
         device.new_buffer((count as u64) * 64, MTLResourceOptions::StorageModeShared);
 

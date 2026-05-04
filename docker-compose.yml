@@ -1,0 +1,23 @@
+services:
+  meshcore-keygen-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: meshcore-keygen-ui:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=UTC
+      - APP_BIND=0.0.0.0:8080
+      - RESERVED_CPU_CORES=1
+      - RUST_LOG=info
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

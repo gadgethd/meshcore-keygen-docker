@@ -1,6 +1,6 @@
-mod keygen;
 #[cfg(feature = "cuda")]
 mod gpu;
+mod keygen;
 #[cfg(feature = "metal")]
 mod metal_gpu;
 mod search;
@@ -23,7 +23,11 @@ use ratatui::{
 use search::SearchHandle;
 
 #[derive(Parser)]
-#[command(name = "mc-keygen", version, about = "MeshCore vanity Ed25519 key generator")]
+#[command(
+    name = "mc-keygen",
+    version,
+    about = "MeshCore vanity Ed25519 key generator"
+)]
 struct Cli {
     /// Hex prefix(es) to search for (1-8 chars, 0-9/A-F each)
     #[arg(required = true)]
@@ -64,7 +68,10 @@ fn validate_prefix(prefix: &str) -> Result<String, String> {
     }
 
     if !upper.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!("prefix must be valid hex (0-9, A-F), got '{}'", prefix));
+        return Err(format!(
+            "prefix must be valid hex (0-9, A-F), got '{}'",
+            prefix
+        ));
     }
 
     // Reject prefixes that would always start with 00 or FF
@@ -156,7 +163,7 @@ fn run_tui_loop(
                     Constraint::Length(1), // speed
                     Constraint::Length(1), // elapsed
                     Constraint::Length(1), // est remaining
-                    Constraint::Min(0),   // spacer
+                    Constraint::Min(0),    // spacer
                 ])
                 .split(inner);
 
@@ -165,7 +172,9 @@ fn run_tui_loop(
                 Span::styled(&*prefix_label_owned, Style::default().fg(Color::Gray)),
                 Span::styled(
                     &*prefix_display_owned,
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("  ({})", mode_label_owned),
@@ -203,7 +212,9 @@ fn run_tui_loop(
                 Span::styled("Keys checked:   ", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format_number(stats.attempts),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
             frame.render_widget(Paragraph::new(keys_line), chunks[4]);
@@ -212,7 +223,9 @@ fn run_tui_loop(
                 Span::styled("Speed:          ", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format!("{} keys/sec", format_number(stats.keys_per_sec as u64)),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
             frame.render_widget(Paragraph::new(speed_line), chunks[5]);
@@ -295,38 +308,17 @@ fn print_colored_result(result: &types::SearchResult) {
     let prefix_len = result.matched_prefix.len();
     let pk_prefix = &result.public_key[..prefix_len];
     let pk_rest = &result.public_key[prefix_len..];
-    eprint!(
-        "{}",
-        style::style("Public Key:  ").dim()
-    );
-    eprint!(
-        "{}",
-        style::style(pk_prefix).green().bold()
-    );
-    eprintln!(
-        "{}",
-        style::style(pk_rest).white()
-    );
+    eprint!("{}", style::style("Public Key:  ").dim());
+    eprint!("{}", style::style(pk_prefix).green().bold());
+    eprintln!("{}", style::style(pk_rest).white());
 
     // Private key
-    eprint!(
-        "{}",
-        style::style("Private Key: ").dim()
-    );
-    eprintln!(
-        "{}",
-        style::style(&result.private_key).white()
-    );
+    eprint!("{}", style::style("Private Key: ").dim());
+    eprintln!("{}", style::style(&result.private_key).white());
 
     if let Some(seed) = &result.seed {
-        eprint!(
-            "{}",
-            style::style("Seed:        ").dim()
-        );
-        eprintln!(
-            "{}",
-            style::style(seed).white()
-        );
+        eprint!("{}", style::style("Seed:        ").dim());
+        eprintln!("{}", style::style(seed).white());
     }
 }
 
@@ -461,7 +453,10 @@ fn main() {
         (SearchHandle::start(&prefixes, num_threads), label)
     } else {
         let gpu_label = gpu_names_label(&gpu_searchers);
-        let label = format!("{} + {} threads{}", gpu_label, num_threads, prefix_count_label);
+        let label = format!(
+            "{} + {} threads{}",
+            gpu_label, num_threads, prefix_count_label
+        );
         (
             SearchHandle::start_hybrid(&prefixes, num_threads, gpu_searchers),
             label,
