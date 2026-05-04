@@ -1,16 +1,14 @@
-use std::io::BufRead;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::sleep;
-
-use crate::server::db::DbPool;
-use crate::server::models::{Job, JobStatus, ResultRecord};
 use uuid::Uuid;
 
-/// The queue manager watches the jobs table and runs queued jobs.
-/// Only one job runs at a time (per GPU).
+use crate::deterministic::DeterministicState;
+use crate::search::SearchHandle;
+use crate::server::db::DbPool;
+use crate::server::models::{Job, JobStatus, ResultRecord};
+
 pub struct QueueManager {
     db: DbPool,
     running: Arc<TokioMutex<bool>>,
@@ -24,15 +22,13 @@ impl QueueManager {
         }
     }
 
-    /// Start the queue manager loop. Runs forever, polling for work.
     pub async fn run(&self) {
         loop {
             sleep(Duration::from_secs(2)).await;
 
-            // Check if we should start a new job
             let mut is_running = self.running.lock().await;
             if *is_running {
-                continue; // already running a job
+                continue;
             }
 
             let next_job = {
@@ -48,16 +44,23 @@ impl QueueManager {
                 let running = self.running.clone();
                 let job_id = job.id.clone();
                 let prefixes = job.prefixes.clone();
+                let backend = job.backend.clone();
 
                 tokio::task::spawn_blocking(move || {
-                    run_job(db, running, job_id, prefixes);
+                    run_job_in_thread(db, running, job_id, prefixes, backend);
                 });
             }
         }
     }
 }
 
-fn run_job(db: DbPool, running: Arc<TokioMutex<bool>>, job_id: String, prefixes: Vec<String>) {
+fn run_job_in_thread(
+    db: DbPool,
+    running: Arc<TokioMutex<bool>>,
+    job_id: String,
+    prefixes: Vec<String>,
+    _backend: String,
+) {
     // Mark job as running
     {
         let db = db.lock().unwrap();
@@ -67,88 +70,112 @@ fn run_job(db: DbPool, running: Arc<TokioMutex<bool>>, job_id: String, prefixes:
         }
     }
 
-    // Build checkpoint path
-    std::fs::create_dir_all("/data/checkpoints").ok();
-    let checkpoint_path = format!("/data/checkpoints/{}.json", job_id);
+    // Create deterministic state
+    let deterministic_state = DeterministicState::new();
+    let master_seed_hex = deterministic_state.master_seed_hex();
 
-    let mut args: Vec<String> = vec![
-        "--deterministic".into(),
-        "--checkpoint".into(),
-        checkpoint_path.clone(),
-        "--checkpoint-interval".into(),
-        "10".into(),
-        "--json-progress".into(),
-    ];
-    args.extend(prefixes.iter().map(|p| p.clone()));
-
-    let mut child = match Command::new("/app/mc-keygen")
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    // Store master seed on job
     {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to start keygen for job {}: {}", job_id, e);
-            mark_failed(&db, &job_id, &e.to_string());
-            return;
+        let db = db.lock().unwrap();
+        if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
+            job.master_seed = Some(master_seed_hex.clone());
+            let _ = crate::server::db::update_job(&db, &job);
         }
-    };
+    }
 
-    // Read JSON progress from stdout
-    if let Some(stdout) = child.stdout.take() {
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                        let typ = val["type"].as_str().unwrap_or("");
-                        match typ {
-                            "progress" => {
-                                let _ = update_progress(&db, &job_id, &val);
-                            }
-                            "result" => {
-                                let _ = save_result(&db, &job_id, &val);
-                                // Mark job completed
-                                let db = db.lock().unwrap();
-                                if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id)
-                                {
-                                    job.status = JobStatus::Completed;
-                                    let _ = crate::server::db::update_job(&db, &job);
-                                }
-                            }
-                            _ => {}
-                        }
+    // Checkpoint path
+    std::fs::create_dir_all("/data/checkpoints").ok();
+    let checkpoint_path = Some(std::path::PathBuf::from(format!(
+        "/data/checkpoints/{}.json",
+        job_id
+    )));
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get().saturating_sub(1).max(1))
+        .unwrap_or(1);
+
+    let handle = SearchHandle::start_deterministic(
+        &prefixes,
+        deterministic_state,
+        num_threads,
+        checkpoint_path,
+        10,
+        false,
+    );
+
+    let start = Instant::now();
+    let mut last_progress_update = Instant::now();
+
+    // Poll for results with progress updates
+    loop {
+        if handle.is_done() {
+            break;
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Update progress every 2 seconds
+        if last_progress_update.elapsed() >= Duration::from_secs(2) {
+            last_progress_update = Instant::now();
+            if let Ok(db) = db.lock() {
+                if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
+                    let stats = handle.stats(0);
+                    job.attempts_done = stats.attempts;
+                    job.keys_per_second = stats.keys_per_sec;
+                    job.elapsed_seconds = stats.elapsed_secs;
+                    if let Some(state) = handle.get_deterministic_state() {
+                        job.next_counter = Some(state.counter);
                     }
+                    let _ = crate::server::db::update_job(&db, &job);
                 }
-                Err(_) => break,
             }
         }
     }
 
-    let status = child.wait();
-    match status {
-        Ok(s) if !s.success() => {
-            eprintln!("Keygen for job {} exited with {:?}", job_id, s.code());
+    let elapsed = start.elapsed();
+    let stats = handle.stats(0);
+
+    match handle.finish() {
+        Ok(result) => {
+            // Save result
+            let db = db.lock().unwrap();
+            let result_record = ResultRecord {
+                id: Uuid::new_v4().to_string(),
+                job_id: job_id.clone(),
+                prefix: result.matched_prefix,
+                public_key: result.public_key,
+                private_key: result.private_key,
+                candidate_seed: result.seed,
+                master_seed: result.master_seed,
+                counter: result.counter,
+                attempts: result.attempts,
+                elapsed_seconds: result.elapsed_secs,
+                keys_per_second: if result.elapsed_secs > 0.0 {
+                    result.attempts as f64 / result.elapsed_secs
+                } else {
+                    0.0
+                },
+                backend: "cpu".to_string(),
+                device: String::new(),
+                created_at: chrono_now(),
+            };
+            let _ = crate::server::db::insert_result(&db, &result_record);
+
+            // Mark job completed
+            if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
+                job.status = JobStatus::Completed;
+                job.attempts_done = stats.attempts;
+                job.keys_per_second = stats.keys_per_sec;
+                job.elapsed_seconds = elapsed.as_secs_f64();
+                let _ = crate::server::db::update_job(&db, &job);
+            }
         }
         Err(e) => {
-            eprintln!("Keygen for job {} failed: {}", job_id, e);
-        }
-        _ => {}
-    }
-
-    // Ensure job is marked completed/failed if process exits without result
-    {
-        let db = db.lock().unwrap();
-        if let Ok(Some(job)) = crate::server::db::get_job(&db, &job_id) {
-            if job.status == JobStatus::Running {
-                let _ = crate::server::db::update_job(
-                    &db,
-                    &Job {
-                        status: JobStatus::Failed,
-                        ..job
-                    },
-                );
+            let db = db.lock().unwrap();
+            if let Ok(Some(mut job)) = crate::server::db::get_job(&db, &job_id) {
+                job.status = JobStatus::Failed;
+                job.notes = Some(format!("Search error: {}", e));
+                let _ = crate::server::db::update_job(&db, &job);
             }
         }
     }
@@ -159,58 +186,6 @@ fn run_job(db: DbPool, running: Arc<TokioMutex<bool>>, job_id: String, prefixes:
         let mut r = running.lock().await;
         *r = false;
     });
-}
-
-fn update_progress(db: &DbPool, job_id: &str, val: &serde_json::Value) -> Result<(), String> {
-    let db = db.lock().map_err(|e| e.to_string())?;
-    let mut job = crate::server::db::get_job(&db, job_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("job not found")?;
-
-    if let Some(attempts) = val["attempts"].as_u64() {
-        job.attempts_done = attempts;
-    }
-    if let Some(kps) = val["keys_per_second"].as_f64() {
-        job.keys_per_second = kps;
-    }
-    if let Some(elapsed) = val["elapsed_seconds"].as_f64() {
-        job.elapsed_seconds = elapsed;
-    }
-    if let Some(counter) = val["next_counter"].as_u64() {
-        job.next_counter = Some(counter);
-    }
-
-    crate::server::db::update_job(&db, &job).map_err(|e| e.to_string())
-}
-
-fn save_result(db: &DbPool, job_id: &str, val: &serde_json::Value) -> Result<(), String> {
-    let db = db.lock().map_err(|e| e.to_string())?;
-    let result = ResultRecord {
-        id: Uuid::new_v4().to_string(),
-        job_id: job_id.to_string(),
-        prefix: val["prefix"].as_str().unwrap_or("").to_string(),
-        public_key: val["public_key"].as_str().unwrap_or("").to_string(),
-        private_key: val["private_key"].as_str().unwrap_or("").to_string(),
-        candidate_seed: val["candidate_seed"].as_str().map(|s| s.to_string()),
-        master_seed: val["master_seed"].as_str().map(|s| s.to_string()),
-        counter: val["counter"].as_u64(),
-        attempts: val["attempts"].as_u64().unwrap_or(0),
-        elapsed_seconds: val["elapsed_seconds"].as_f64().unwrap_or(0.0),
-        keys_per_second: 0.0,
-        backend: "cpu".to_string(),
-        device: "".to_string(),
-        created_at: chrono_now(),
-    };
-    crate::server::db::insert_result(&db, &result).map_err(|e| e.to_string())
-}
-
-fn mark_failed(db: &DbPool, job_id: &str, error: &str) {
-    let db = db.lock().unwrap();
-    if let Ok(Some(mut job)) = crate::server::db::get_job(&db, job_id) {
-        job.status = JobStatus::Failed;
-        job.notes = Some(format!("Error: {}", error));
-        let _ = crate::server::db::update_job(&db, &job);
-    }
 }
 
 fn chrono_now() -> String {
