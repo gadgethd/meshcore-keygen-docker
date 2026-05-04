@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 default = []
 cuda = ["dep:cudarc"]
 metal = ["dep:metal"]
-server = ["dep:axum", "dep:tokio", "dep:rusqlite", "dep:tower-http", "dep:tower", "dep:uuid"]
+server = ["dep:axum", "dep:tokio", "dep:rusqlite", "dep:tower-http", "dep:tower", "dep:uuid", "dep:futures"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -29,6 +29,7 @@ rusqlite = { version = "0.32", optional = true, features = ["bundled"] }
 tower-http = { version = "0.6", optional = true, features = ["cors", "fs"] }
 tower = { version = "0.5", optional = true }
 uuid = { version = "1", optional = true, features = ["v4"] }
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
