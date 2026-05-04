@@ -36,8 +36,8 @@ use search::SearchHandle;
     about = "MeshCore vanity Ed25519 key generator"
 )]
 struct Cli {
-    /// Hex prefix(es) to search for (1-64 chars, 0-9/A-F each)
-    #[arg(required = true)]
+    /// Hex prefix(es) to search for (1-64 chars, 0-9/A-F each). Required unless --serve.
+    #[arg()]
     prefix: Vec<String>,
 
     /// Number of worker threads (default: all cores)
@@ -448,6 +448,11 @@ fn main() {
             }
         });
         return;
+    }
+
+    if cli.prefix.is_empty() {
+        eprintln!("Error: at least one PREFIX is required (or use --serve)");
+        std::process::exit(1);
     }
 
     let mut prefixes = Vec::new();
