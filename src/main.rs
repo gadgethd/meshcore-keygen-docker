@@ -111,6 +111,18 @@ struct Cli {
     #[cfg(feature = "server")]
     #[arg(long)]
     serve: bool,
+
+    /// Run a benchmark (random prefix, default 6 chars)
+    #[arg(long)]
+    benchmark: bool,
+
+    /// Prefix length for benchmark (default: 6)
+    #[arg(long, default_value = "6")]
+    benchmark_prefix_length: u32,
+
+    /// Benchmark timeout in seconds (0 = no timeout)
+    #[arg(long, default_value = "0")]
+    benchmark_timeout: u64,
 }
 
 fn validate_prefix(prefix: &str) -> Result<String, String> {
@@ -432,6 +444,102 @@ fn gpu_names_label(searchers: &[Box<dyn search::GpuSearcher>]) -> String {
         .join(", ")
 }
 
+fn run_benchmark(prefix_length: u32, timeout_secs: u64) {
+    use rand::Rng;
+
+    eprintln!("=== Benchmark ===");
+    eprintln!("Prefix length: {} chars", prefix_length);
+
+    // Generate random hex prefix
+    let hex_chars: &[u8] = b"0123456789ABCDEF";
+    let mut rng = rand::thread_rng();
+    let prefix: String = (0..prefix_length)
+        .map(|_| hex_chars[rng.gen_range(0..16)] as char)
+        .collect();
+    eprintln!("Target prefix: {}", prefix);
+
+    let prefixes = vec![prefix.clone()];
+    let state = deterministic::DeterministicState::new();
+    let cpu_config = cpu::CpuConfig::detect();
+    let num_threads = cpu_config.available_workers().max(1);
+
+    let start = std::time::Instant::now();
+    let handle = SearchHandle::start_deterministic(&prefixes, state, num_threads, None, 10, false);
+
+    let backend = "cpu";
+    let device = "none";
+
+    // Poll until found or timeout
+    loop {
+        if handle.is_done() {
+            break;
+        }
+        if timeout_secs > 0 && start.elapsed().as_secs() >= timeout_secs {
+            eprintln!("Timeout reached ({timeout_secs}s)");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let stats = handle.stats(0);
+        eprint!(
+            "\r  Attempts: {}  Keys/s: {}  Elapsed: {:.1}s",
+            format_number(stats.attempts),
+            format_number(stats.keys_per_sec as u64),
+            stats.elapsed_secs,
+        );
+    }
+    eprintln!();
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let attempts = handle.stats(0).attempts;
+    let kps = if elapsed > 0.0 {
+        attempts as f64 / elapsed
+    } else {
+        0.0
+    };
+
+    let found = handle.is_done();
+    let result = handle.finish();
+
+    eprintln!();
+    if found {
+        eprintln!("✓ Found match!");
+        if let Ok(ref r) = result {
+            eprintln!("  Public key: {}", r.public_key);
+        }
+    } else {
+        eprintln!("✗ Did not find match (timeout)");
+    }
+    eprintln!("  Attempts:      {}", format_number(attempts));
+    eprintln!("  Elapsed:       {:.2}s", elapsed);
+    eprintln!("  Keys/sec:      {}", format_number(kps as u64));
+    eprintln!("  Backend:       {}", backend);
+    eprintln!(
+        "  CPU workers:   {} ({} reserved)",
+        num_threads, cpu_config.reserved_cores
+    );
+    eprintln!("  Total cores:   {}", cpu_config.total_logical_cores);
+
+    // Output JSON result
+    let benchmark_result = serde_json::json!({
+        "type": "benchmark_result",
+        "target_prefix": prefix,
+        "prefix_length": prefix_length,
+        "attempts": attempts,
+        "runtime_seconds": elapsed,
+        "average_keys_per_second": kps,
+        "found": found,
+        "backend": backend,
+        "device": device,
+        "cpu_total_cores": cpu_config.total_logical_cores,
+        "cpu_reserved_cores": cpu_config.reserved_cores,
+        "cpu_worker_threads": num_threads,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&benchmark_result).unwrap()
+    );
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -447,6 +555,12 @@ fn main() {
                 std::process::exit(1);
             }
         });
+        return;
+    }
+
+    // --benchmark mode
+    if cli.benchmark {
+        run_benchmark(cli.benchmark_prefix_length, cli.benchmark_timeout);
         return;
     }
 
