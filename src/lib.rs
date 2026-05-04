@@ -1,3 +1,4 @@
+pub mod checkpoint;
 pub mod cpu;
 pub mod deterministic;
 pub mod keygen;

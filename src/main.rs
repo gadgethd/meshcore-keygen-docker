@@ -1,3 +1,4 @@
+mod checkpoint;
 mod cpu;
 mod deterministic;
 #[cfg(feature = "cuda")]
