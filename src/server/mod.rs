@@ -14,6 +14,27 @@ use state::AppState;
 /// Start the web server with Axum.
 pub async fn run(bind: &str, db_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let pool = db::open(db_path)?;
+
+    // Clean up any stuck running/paused jobs from previous run
+    {
+        let db = pool.lock().unwrap_or_else(|e| e.into_inner());
+        let jobs = db::list_jobs(&db).unwrap_or_default();
+        for job in &jobs {
+            if job.status == crate::server::models::JobStatus::Running
+                || job.status == crate::server::models::JobStatus::Paused
+            {
+                let _ = db::update_job(
+                    &db,
+                    &crate::server::models::Job {
+                        status: crate::server::models::JobStatus::Stopped,
+                        notes: Some("Server restarted — job interrupted".to_string()),
+                        ..job.clone()
+                    },
+                );
+            }
+        }
+    }
+
     let (state, _shutdown_rx) = AppState::new(pool.clone());
 
     // Start queue manager in background

@@ -44,7 +44,7 @@ pub fn log(db: &DbPool, level: &str, job_id: Option<&str>, message: &str) {
         job_id: job_id.map(|s| s.to_string()),
         message: message.to_string(),
     };
-    if let Ok(db) = db.lock() {
+    if let Ok(db) = db.try_lock() {
         let _ = crate::server::db::insert_log(&db, &entry);
     }
 }

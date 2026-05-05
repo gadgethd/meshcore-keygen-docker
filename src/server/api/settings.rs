@@ -111,45 +111,51 @@ async fn update_settings(
 
 async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::Value>, StatusCode> {
     let state_clone = state.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, StatusCode> {
-        let db = state_clone
-            .db
-            .lock()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let cfg = crate::cpu::CpuConfig::detect();
-        let jobs = crate::server::db::list_jobs(&db).unwrap_or_default();
-        let results = crate::server::db::list_results(&db).unwrap_or_default();
-        let active_job = jobs
-            .iter()
-            .find(|j| j.status == JobStatus::Running)
-            .cloned();
-        let queue_len = jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Queued)
-            .count();
-        let last_bm = crate::server::db::get_default_benchmark(&db).ok().flatten();
-        let settings = crate::server::db::load_settings(&db);
-        let (gpu_available, gpu_name) = detect_gpu();
-
-        Ok(serde_json::json!({
-            "cpu_total_cores": cfg.total_logical_cores,
-            "cpu_reserved_cores": 1,
-            "cpu_available_workers": cfg.available_workers(),
-            "gpu_available": gpu_available,
-            "gpu_name": gpu_name,
-            "active_job": active_job,
-            "queue_length": queue_len,
-            "results_count": results.len(),
-            "last_benchmark_keys_per_second": last_bm.map(|b| b.keys_per_second),
-            "schedule_enabled": settings.schedule_enabled,
-            "schedule_start": settings.schedule_start,
-            "schedule_end": settings.schedule_end,
-        }))
-    })
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || -> Result<serde_json::Value, StatusCode> {
+            let db = state_clone
+                .db
+                .try_lock()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            let cfg = crate::cpu::CpuConfig::detect();
+            let jobs = crate::server::db::list_jobs(&db).unwrap_or_default();
+            let results = crate::server::db::list_results(&db).unwrap_or_default();
+            let active_job = jobs
+                .iter()
+                .find(|j| j.status == JobStatus::Running)
+                .cloned();
+            let queue_len = jobs
+                .iter()
+                .filter(|j| j.status == JobStatus::Queued)
+                .count();
+            let last_bm = crate::server::db::get_default_benchmark(&db).ok().flatten();
+            let settings = crate::server::db::load_settings(&db);
+            let (gpu_available, gpu_name) = detect_gpu();
+            Ok(serde_json::json!({
+                "cpu_total_cores": cfg.total_logical_cores,
+                "cpu_reserved_cores": 1,
+                "cpu_available_workers": cfg.available_workers(),
+                "gpu_available": gpu_available,
+                "gpu_name": gpu_name,
+                "active_job": active_job,
+                "queue_length": queue_len,
+                "results_count": results.len(),
+                "last_benchmark_keys_per_second": last_bm.map(|b| b.keys_per_second),
+                "schedule_enabled": settings.schedule_enabled,
+                "schedule_start": settings.schedule_start,
+                "schedule_end": settings.schedule_end,
+            }))
+        }),
+    )
     .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(result?))
+    match result {
+        Ok(json) => Ok(Json(json)),
+        Err(e) => Err(e),
+    }
 }
 
 async fn devices(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
