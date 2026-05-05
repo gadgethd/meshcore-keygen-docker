@@ -54,6 +54,9 @@ pub struct UpdateSettingsRequest {
     pub timezone: Option<String>,
     pub hide_secrets: Option<bool>,
     pub max_log_lines: Option<usize>,
+    pub schedule_enabled: Option<bool>,
+    pub schedule_start: Option<String>,
+    pub schedule_end: Option<String>,
 }
 
 async fn update_settings(
@@ -89,6 +92,15 @@ async fn update_settings(
     if let Some(v) = req.max_log_lines {
         crate::server::db::save_setting(&db, "max_log_lines", &v.to_string()).ok();
     }
+    if let Some(v) = req.schedule_enabled {
+        crate::server::db::save_setting(&db, "schedule_enabled", &v.to_string()).ok();
+    }
+    if let Some(ref v) = req.schedule_start {
+        crate::server::db::save_setting(&db, "schedule_start", v).ok();
+    }
+    if let Some(ref v) = req.schedule_end {
+        crate::server::db::save_setting(&db, "schedule_end", v).ok();
+    }
 
     let settings = crate::server::db::load_settings(&db);
     Ok(Json(Settings {
@@ -114,6 +126,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         .filter(|j| j.status == JobStatus::Queued)
         .count();
     let last_bm = crate::server::db::get_default_benchmark(&db).ok().flatten();
+    let settings = crate::server::db::load_settings(&db);
 
     // GPU detection
     let (gpu_available, gpu_name) = detect_gpu();
@@ -128,6 +141,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         "queue_length": queue_len,
         "results_count": results.len(),
         "last_benchmark_keys_per_second": last_bm.map(|b| b.keys_per_second),
+        "schedule_enabled": settings.schedule_enabled,
+        "schedule_start": settings.schedule_start,
+        "schedule_end": settings.schedule_end,
     })))
 }
 

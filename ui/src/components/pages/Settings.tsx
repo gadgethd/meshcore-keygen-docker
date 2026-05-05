@@ -42,6 +42,28 @@ export default function Settings() {
           <Field label="Max Worker Threads" v={s.max_worker_threads ?? ''} set={v => update('max_worker_threads', v ? Number(v) : null)} type="number" placeholder="Auto" />
           <Field label="Checkpoint Interval (s)" v={s.checkpoint_interval_secs} set={v => update('checkpoint_interval_secs', Number(v))} type="number" />
         </div>
+        <div className="glass-card">
+          <div className="panel-header"><span className="panel-title">Global Schedule</span></div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, marginBottom: 14 }}>
+            <input type="checkbox" checked={s.schedule_enabled} onChange={e => update('schedule_enabled', e.target.checked)} /> Enable schedule
+          </label>
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label">Start (HH:MM)</label>
+              <input className="form-input" value={s.schedule_start} onChange={e => update('schedule_start', e.target.value)} placeholder="23:00" />
+            </div>
+            <div className="form-group">
+              <label className="form-label">End (HH:MM)</label>
+              <input className="form-input" value={s.schedule_end} onChange={e => update('schedule_end', e.target.value)} placeholder="07:00" />
+            </div>
+          </div>
+          <div className="form-hint">Keygen runs only during this window. If start &gt; end, window crosses midnight (e.g. 23:00–07:00 = overnight).</div>
+          {s.schedule_enabled && (
+            <div className="warning-banner" style={{ marginTop: 12 }}>
+              Queue auto-paused outside window · Jobs won't start until {s.schedule_start}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

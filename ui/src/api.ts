@@ -64,6 +64,7 @@ export interface SettingsData {
   reserved_cpu_cores: number; max_worker_threads?: number;
   checkpoint_interval_secs: number; default_backend: string; default_benchmark_id?: string;
   timezone: string; hide_secrets: boolean; max_log_lines: number;
+  schedule_enabled: boolean; schedule_start: string; schedule_end: string;
 }
 
 export const api = {

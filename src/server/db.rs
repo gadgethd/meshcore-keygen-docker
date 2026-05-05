@@ -117,6 +117,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         save_setting(conn, "hide_secrets", &defaults.hide_secrets.to_string())?;
         save_setting(conn, "max_log_lines", &defaults.max_log_lines.to_string())?;
         save_setting(conn, "bind_address", &defaults.bind_address)?;
+        save_setting(
+            conn,
+            "schedule_enabled",
+            &defaults.schedule_enabled.to_string(),
+        )?;
+        save_setting(conn, "schedule_start", &defaults.schedule_start)?;
+        save_setting(conn, "schedule_end", &defaults.schedule_end)?;
     }
 
     Ok(())
@@ -162,6 +169,11 @@ pub fn load_settings(conn: &Connection) -> Settings {
         bind_address: get_setting(conn, "bind_address")
             .unwrap_or_else(|| "0.0.0.0:8080".to_string()),
         password_hash: get_setting(conn, "password_hash"),
+        schedule_enabled: get_setting(conn, "schedule_enabled")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(false),
+        schedule_start: get_setting(conn, "schedule_start").unwrap_or_else(|| "23:00".to_string()),
+        schedule_end: get_setting(conn, "schedule_end").unwrap_or_else(|| "07:00".to_string()),
     }
 }
 

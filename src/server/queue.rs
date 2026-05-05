@@ -41,6 +41,16 @@ impl QueueManager {
             };
 
             if let Some(job) = next_job {
+                // Check global schedule
+                {
+                    let db = lock_db(&self.db);
+                    let settings = dbmod::load_settings(&db);
+                    if settings.schedule_enabled && !is_in_window(&settings) {
+                        // Outside allowed window, don't start
+                        continue;
+                    }
+                }
+
                 *is_running = true;
                 drop(is_running);
 
@@ -302,6 +312,46 @@ fn chrono_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_default()
+}
+
+/// Check if current time is within the schedule window.
+/// Format: start/end are "HH:MM" strings (e.g. "23:00", "07:00").
+/// If start > end, the window crosses midnight (e.g. 23:00-07:00 = overnight).
+fn is_in_window(settings: &crate::server::models::Settings) -> bool {
+    let now = std::time::SystemTime::now();
+    // Convert UTC to approximate local: get TZ from settings, fall back to UTC
+    let epoch = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = epoch.as_secs();
+
+    // Use a simple offset-based approach; for UTC we ignore DST
+    // The timezone setting is stored as e.g. "UTC", "Europe/Zurich", etc.
+    // For now use UTC; full tz support would need the chrono crate
+    let total_secs = secs;
+    let hours = ((total_secs / 3600) % 24) as u32;
+    let minutes = ((total_secs / 60) % 60) as u32;
+    let current_minutes = hours * 60 + minutes;
+
+    let parse = |s: &str| -> Option<u32> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() == 2 {
+            let h: u32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            Some(h * 60 + m)
+        } else {
+            None
+        }
+    };
+
+    let start = parse(&settings.schedule_start).unwrap_or(23 * 60);
+    let end = parse(&settings.schedule_end).unwrap_or(7 * 60);
+
+    if start <= end {
+        current_minutes >= start && current_minutes < end
+    } else {
+        current_minutes >= start || current_minutes < end
+    }
 }
 
 struct RunningGuard {

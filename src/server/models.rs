@@ -105,6 +105,9 @@ pub struct Settings {
     pub max_log_lines: usize,
     pub bind_address: String,
     pub password_hash: Option<String>,
+    pub schedule_enabled: bool,
+    pub schedule_start: String,
+    pub schedule_end: String,
 }
 
 impl Default for Settings {
@@ -120,6 +123,9 @@ impl Default for Settings {
             max_log_lines: 10000,
             bind_address: "0.0.0.0:8080".to_string(),
             password_hash: None,
+            schedule_enabled: false,
+            schedule_start: "23:00".to_string(),
+            schedule_end: "07:00".to_string(),
         }
     }
 }
