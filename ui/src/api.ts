@@ -58,6 +58,7 @@ export interface SystemStatus {
   cpu_total_cores: number; cpu_reserved_cores: number; cpu_available_workers: number;
   gpu_available: boolean; gpu_name?: string; active_job?: Job;
   queue_length: number; results_count: number; last_benchmark_keys_per_second?: number;
+  schedule_enabled: boolean; schedule_start: string; schedule_end: string;
 }
 
 export interface SettingsData {
