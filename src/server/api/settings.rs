@@ -16,6 +16,21 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/devices", axum::routing::get(devices))
 }
 
+fn detect_gpu() -> (bool, Option<String>) {
+    #[cfg(feature = "cuda")]
+    {
+        match crate::gpu::detect_cuda() {
+            (true, name) => return (true, name),
+            (false, _) => {}
+        }
+    }
+    #[cfg(feature = "metal")]
+    {
+        // Metal detection would go here
+    }
+    (false, None)
+}
+
 async fn get_settings(State(state): State<Arc<AppState>>) -> Result<Json<Settings>, StatusCode> {
     let db = state
         .db
@@ -100,12 +115,15 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         .count();
     let last_bm = crate::server::db::get_default_benchmark(&db).ok().flatten();
 
+    // GPU detection
+    let (gpu_available, gpu_name) = detect_gpu();
+
     Ok(Json(serde_json::json!({
         "cpu_total_cores": cfg.total_logical_cores,
         "cpu_reserved_cores": 1,
         "cpu_available_workers": cfg.available_workers(),
-        "gpu_available": false,
-        "gpu_name": null,
+        "gpu_available": gpu_available,
+        "gpu_name": gpu_name,
         "active_job": active_job,
         "queue_length": queue_len,
         "results_count": results.len(),
@@ -114,7 +132,6 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
 }
 
 async fn devices(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    // Report available backends
     let mut backends = vec![serde_json::json!({
         "name": "cpu",
         "type": "cpu",
@@ -124,12 +141,12 @@ async fn devices(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value>
 
     #[cfg(feature = "cuda")]
     {
-        // Attempt light CUDA detection
+        let (available, name) = crate::gpu::detect_cuda();
         backends.push(serde_json::json!({
             "name": "cuda",
             "type": "gpu",
-            "available": true,
-            "description": "CUDA GPU"
+            "available": available,
+            "description": name.unwrap_or_else(|| "CUDA GPU".to_string()),
         }));
     }
 

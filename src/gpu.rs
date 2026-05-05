@@ -49,6 +49,19 @@ impl fmt::Display for CudaError {
 
 impl std::error::Error for CudaError {}
 
+/// Try to detect a CUDA GPU. Returns (available, device_name).
+pub fn detect_cuda() -> (bool, Option<String>) {
+    match CudaContext::new(0) {
+        Ok(ctx) => {
+            let name = ctx
+                .name()
+                .unwrap_or_else(|_| "Unknown CUDA GPU".to_string());
+            (true, Some(name))
+        }
+        Err(_) => (false, None),
+    }
+}
+
 /// Compile the kernel and return (module, context, stream).
 fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), CudaError> {
     let ctx = CudaContext::new(0).map_err(|e| {
