@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::deterministic::DeterministicState;
 use crate::search::SearchHandle;
+use crate::server::api::logs;
 use crate::server::db::{self as dbmod};
 use crate::server::models::{JobStatus, ResultRecord};
 
@@ -94,6 +95,7 @@ fn run_job_sync(
     let _release = RunningGuard {
         running: running.clone(),
     };
+    let db_pool = &db; // keep reference to DbPool for logging
 
     // Mark as running
     {
@@ -103,6 +105,12 @@ fn run_job_sync(
             let _ = dbmod::update_job(&db, &j);
         }
     }
+    logs::log(
+        &db,
+        "info",
+        Some(&job_id),
+        &format!("Job started with backend: {}", backend),
+    );
 
     // Create state and store master seed
     let deterministic_state = DeterministicState::new();
@@ -132,6 +140,7 @@ fn run_job_sync(
             let searchers = crate::gpu::try_init_gpu(&prefixes);
             if searchers.is_empty() {
                 mark_failed(&db, &job_id, "CUDA GPU unavailable — check that NVIDIA drivers and container toolkit are configured");
+                logs::log(&db, "error", Some(&job_id), "CUDA GPU unavailable");
                 return;
             }
             searchers
@@ -195,6 +204,12 @@ fn run_job_sync(
                 }
                 let _ = dbmod::update_job(&db, &j);
             }
+            logs::log(
+                db_pool,
+                "info",
+                Some(&job_id),
+                "Job stopped (limit reached or cancelled)",
+            );
         }
     }
 
@@ -234,6 +249,12 @@ fn run_job_sync(
                     j.elapsed_seconds = elapsed.as_secs_f64();
                     let _ = dbmod::update_job(&db, &j);
                 }
+                logs::log(
+                    db_pool,
+                    "info",
+                    Some(&job_id),
+                    &format!("Match found: {}", result.matched_prefix),
+                );
             }
             Err(e) => {
                 let db = lock_db(&db);
@@ -242,6 +263,12 @@ fn run_job_sync(
                     j.notes = Some(format!("Search error: {}", e));
                     let _ = dbmod::update_job(&db, &j);
                 }
+                logs::log(
+                    db_pool,
+                    "error",
+                    Some(&job_id),
+                    &format!("Search failed: {}", e),
+                );
             }
         }
     } else {
