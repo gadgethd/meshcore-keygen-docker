@@ -27,9 +27,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY benches/ benches/
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
     && cargo fetch \
-    && rm -rf src
+    && rm -rf src benches
 
 COPY . .
 
