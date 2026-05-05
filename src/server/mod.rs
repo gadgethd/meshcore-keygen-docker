@@ -6,7 +6,7 @@ pub mod state;
 
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::cpu::CpuConfig;
 use state::AppState;
@@ -27,9 +27,13 @@ pub async fn run(bind: &str, db_path: &str) -> Result<(), Box<dyn std::error::Er
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Serve static files first, then fall back to index.html for SPA routing
+    let spa = ServeFile::new("static/index.html");
+
     let app = api::router()
         .layer(cors)
-        .fallback_service(ServeDir::new("static"))
+        .nest_service("/assets", ServeDir::new("static/assets"))
+        .fallback_service(spa)
         .with_state(state);
 
     let cpu = CpuConfig::detect();
