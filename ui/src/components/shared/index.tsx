@@ -6,16 +6,16 @@ export function MetricCard({ label, value, size = 'normal', color, subtitle }: {
   return (
     <div className={`metric-card${size !== 'normal' ? ' ' + size : ''}`}>
       <div className="label">{label}</div>
-      <div className="value" style={color ? { color } : undefined}>{value}</div>
+      <div className="value" style={color ? { color, fontFamily: 'var(--font-tabular)' } : undefined}>{value}</div>
       {subtitle && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{subtitle}</div>}
     </div>
   );
 }
 
-export function StatusBadge({ status }: { status: string }) {
+export function StatusChip({ status }: { status: string }) {
   const s = status.toLowerCase();
   return (
-    <span className={`status-badge ${s}`}>
+    <span className={`status-chip ${s}`}>
       <span className="dot" /> {status}
     </span>
   );
@@ -26,14 +26,15 @@ export function PrefixBadge({ prefix }: { prefix: string }) {
 }
 
 export function DeviceBadge({ device, backend }: { device?: string; backend?: string }) {
-  return <span className="device-badge">{backend || 'cpu'}{device ? ` (${device})` : ''}</span>;
+  return <span className="device-badge">{backend || 'cpu'}{device ? ` · ${device}` : ''}</span>;
 }
 
 export function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
   const copy = () => {
-    navigator.clipboard.writeText(text).catch(() => {});
+    navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
   };
-  return <button className="ghost" onClick={copy} style={{ fontSize: 11, padding: '2px 8px' }}>{label}</button>;
+  return <button className="ghost" onClick={copy} style={{ fontSize: 11, padding: '2px 8px' }}>{copied ? 'Copied' : label}</button>;
 }
 
 export function ProgressBar({ pct, markers }: { pct: number; markers?: { at: number; label: string }[] }) {
@@ -53,11 +54,13 @@ export function ProgressBar({ pct, markers }: { pct: number; markers?: { at: num
 
 export function EmptyState({ icon, title, desc, action }: { icon: string; title: string; desc: string; action?: React.ReactNode }) {
   return (
-    <div className="empty-state">
-      <div className="icon">{icon}</div>
-      <div className="title">{title}</div>
-      <div className="desc">{desc}</div>
-      {action}
+    <div className="glass-card">
+      <div className="empty-state">
+        <div className="icon">{icon}</div>
+        <div className="title">{title}</div>
+        <div className="desc">{desc}</div>
+        {action}
+      </div>
     </div>
   );
 }
@@ -66,9 +69,13 @@ export function ErrorBanner({ message }: { message: string }) {
   return <div className="error-banner">{message}</div>;
 }
 
-export function TimeDisplay({ seconds, long = false }: { seconds: number; long?: boolean }) {
-  if (!isFinite(seconds) || seconds < 0) return <span className="tabular">-</span>;
-  if (seconds === Infinity) return <span className="tabular">&infin;</span>;
+export function WarningBanner({ message }: { message: string }) {
+  return <div className="warning-banner">{message}</div>;
+}
+
+export function TimeDisplay({ seconds }: { seconds: number }) {
+  if (!isFinite(seconds) || seconds < 0) return <span className="tabular">—</span>;
+  if (seconds === Infinity) return <span className="tabular">∞</span>;
   if (seconds < 60) return <span className="tabular">{seconds.toFixed(1)}s</span>;
   if (seconds < 3600) return <span className="tabular">{Math.floor(seconds / 60)}m {Math.floor(seconds % 60)}s</span>;
   if (seconds < 86400) return <span className="tabular">{Math.floor(seconds / 3600)}h {Math.floor((seconds % 3600) / 60)}m</span>;
@@ -98,33 +105,24 @@ export function formatPct(p: number): string {
   return (p * 100).toFixed(3) + '%';
 }
 
-export function formatProb(attempts: number, expected: number): string {
-  if (expected === 0) return '0%';
-  return formatPct(1 - Math.exp(-attempts / expected));
-}
-
 export function SecretField({ value, label = 'Private Key' }: { value: string; label?: string }) {
   const [show, setShow] = useState(false);
   return (
-    <div style={{ marginTop: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{label}</span>
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.4px' }}>{label}</span>
         <button
           className="ghost"
-          style={{ fontSize: 11, padding: '2px 8px', color: show ? 'var(--red)' : 'var(--text-secondary)' }}
+          style={{ fontSize: 11, padding: '3px 10px', color: show ? 'var(--danger)' : 'var(--text-secondary)' }}
           onClick={() => setShow(!show)}
         >
           {show ? 'Hide' : 'Reveal'}
         </button>
         {show && <CopyButton text={value} />}
       </div>
-      {show ? (
-        <div className="secret-field">{value}</div>
-      ) : (
-        <div className="secret-field" style={{ color: 'var(--text-muted)', borderColor: 'var(--border-default)' }}>
-          ●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●
-        </div>
-      )}
+      <div className={`secret-field${show ? '' : ' masked'}`}>
+        {show ? value : '●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●●'}
+      </div>
     </div>
   );
 }

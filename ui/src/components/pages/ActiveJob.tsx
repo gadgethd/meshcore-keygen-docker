@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { api, Job, SystemStatus } from '../../api';
-import { MetricCard, StatusBadge, PrefixBadge, ProgressBar, SecretField, TimeDisplay, formatKps, formatNum, formatPct, CopyButton } from '../shared';
+import { Link } from 'react-router-dom';
+import { api, SystemStatus } from '../../api';
+import { MetricCard, StatusChip, PrefixBadge, DeviceBadge, ProgressBar, CopyButton, TimeDisplay, EmptyState, formatKps, formatNum, formatPct } from '../shared';
 
 export default function ActiveJob() {
   const [s, setS] = useState<SystemStatus | null>(null);
@@ -17,15 +17,9 @@ export default function ActiveJob() {
   }, []);
 
   const job = s?.active_job;
-  if (!s) return <div className="skeleton skeleton-value" style={{ width: 200 }} />;
+  if (!s) return <div className="glass-card"><div className="skeleton skeleton-value" /></div>;
   if (!job) return (
-    <div className="panel">
-      <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>
-        <div style={{ fontSize: 36, marginBottom: 8 }}>▶</div>
-        <div style={{ fontSize: 16, color: 'var(--text-secondary)', marginBottom: 8 }}>No Active Job</div>
-        <Link to="/new"><button className="primary">Create a Job</button></Link>
-      </div>
-    </div>
+    <EmptyState icon="▶" title="No Active Job" desc="Start a new search from the New Job page" action={<Link to="/new"><button className="primary">Create Job</button></Link>} />
   );
 
   const minLen = Math.min(...job.prefixes.map(p => p.length));
@@ -38,8 +32,8 @@ export default function ActiveJob() {
     <div>
       <div className="content-header">
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <h1>{job.name || 'Active Job'}</h1>
-          <StatusBadge status={job.status} />
+          <h1>{job.name || 'Active Search'}</h1>
+          <StatusChip status={job.status} />
           {job.prefixes.map(p => <PrefixBadge key={p} prefix={p} />)}
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
@@ -50,10 +44,8 @@ export default function ActiveJob() {
           <button onClick={() => act(() => api.duplicateJob(job.id))}>Duplicate</button>
         </div>
       </div>
-
       {error && <div className="error-banner">{error}</div>}
 
-      {/* Hero metrics */}
       <div className="grid grid-4" style={{ marginBottom: 20 }}>
         <MetricCard label="Keys/s" value={formatKps(job.keys_per_second)} color="var(--accent)" size="hero" />
         <MetricCard label="Attempts" value={formatNum(job.attempts_done)} subtitle={`expected ${formatNum(expected)}`} />
@@ -61,38 +53,34 @@ export default function ActiveJob() {
         <MetricCard label="Elapsed" value={<TimeDisplay seconds={job.elapsed_seconds} />} />
       </div>
 
-      {/* Progress */}
-      <div className="panel" style={{ marginBottom: 20 }}>
-        <div className="panel-header"><span className="panel-title">Progress</span></div>
-        <ProgressBar pct={prob * 100} markers={[
-          { at: 50, label: '50%' }, { at: 90, label: '90%' }, { at: 95, label: '95%' }, { at: 99, label: '99%' }
-        ]} />
-        <div className="grid grid-4" style={{ marginTop: 12 }}>
-          <MetricCard size="small" label="50% at" value={formatNum(expected * 0.693)} />
-          <MetricCard size="small" label="90% at" value={formatNum(expected * 2.302)} />
-          <MetricCard size="small" label="95% at" value={formatNum(expected * 2.996)} />
-          <MetricCard size="small" label="99% at" value={formatNum(expected * 4.605)} />
+      <div className="glass-card" style={{ marginBottom: 20 }}>
+        <div className="panel-header"><span className="panel-title">Probability Progress</span></div>
+        <ProgressBar pct={prob * 100} markers={[{ at: 50, label: '50%' },{ at: 90, label: '90%' },{ at: 95, label: '95%' },{ at: 99, label: '99%' }]} />
+        <div className="grid grid-4" style={{ marginTop: 14 }}>
+          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>50%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 0.693))}</div></div>
+          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>90%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 2.302))}</div></div>
+          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>95%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 2.996))}</div></div>
+          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>99%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 4.605))}</div></div>
         </div>
       </div>
 
-      {/* Details grid */}
       <div className="grid grid-2">
-        <div className="panel">
+        <div className="glass-card">
           <div className="panel-header"><span className="panel-title">Search Details</span></div>
-          <div style={{ fontSize: 13, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 13, display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div><span className="text-muted">Prefixes: </span>{job.prefixes.map(p => <PrefixBadge key={p} prefix={p} />)}</div>
-            <div><span className="text-muted">Backend: </span>{job.backend} · {job.cpu_worker_threads} workers ({job.cpu_reserved_cores} reserved)</div>
+            <div><span className="text-muted">Backend: </span><DeviceBadge backend={job.backend} /> · {job.cpu_worker_threads} workers ({job.cpu_reserved_cores} reserved)</div>
             <div><span className="text-muted">Max attempts: </span>{job.max_attempts ? formatNum(job.max_attempts) : 'Unlimited'}</div>
             <div><span className="text-muted">Max runtime: </span>{job.max_runtime ? <TimeDisplay seconds={job.max_runtime} /> : 'Unlimited'}</div>
           </div>
         </div>
-        <div className="panel">
+        <div className="glass-card">
           <div className="panel-header"><span className="panel-title">Deterministic Resume</span></div>
-          <div style={{ fontSize: 13, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 13, display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div><span className="text-muted">Master seed: </span>
-              {job.master_seed ? <><span className="mono">{job.master_seed.slice(0, 16)}...</span><CopyButton text={job.master_seed} /></> : <span className="text-muted">Not set</span>}
+              {job.master_seed ? <><span className="mono">{job.master_seed.slice(0, 16)}...</span><CopyButton text={job.master_seed} /></> : 'Not set'}
             </div>
-            <div><span className="text-muted">Next counter: </span><span className="tabular mono">{job.next_counter !== null && job.next_counter !== undefined ? formatNum(job.next_counter) : '-'}</span></div>
+            <div><span className="text-muted">Next counter: </span><span className="tabular mono">{job.next_counter != null ? formatNum(job.next_counter) : '—'}</span></div>
             <div><span className="text-muted">Job ID: </span><span className="mono" style={{ fontSize: 11 }}>{job.id.slice(0, 16)}...</span><CopyButton text={job.id} /></div>
           </div>
         </div>

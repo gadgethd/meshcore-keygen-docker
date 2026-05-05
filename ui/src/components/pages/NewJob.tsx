@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, Estimate } from '../../api';
-import { PrefixBadge, TimeDisplay, formatKps, formatNum, formatPct } from '../shared';
+import { PrefixBadge, TimeDisplay, WarningBanner, formatKps, formatNum } from '../shared';
 
 export default function NewJob() {
   const nav = useNavigate();
@@ -23,96 +23,65 @@ export default function NewJob() {
   useEffect(() => {
     if (validPrefixes.length === 0) { setEstimate(null); return; }
     abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const c = new AbortController(); abortRef.current = c;
     const tid = setTimeout(() => {
-      fetch('/api/estimate', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prefixes: validPrefixes, backend }), signal: controller.signal,
-      }).then(r => r.json()).then(setEstimate).catch(() => {});
+      fetch('/api/estimate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prefixes: validPrefixes, backend }), signal: c.signal })
+        .then(r => r.json()).then(setEstimate).catch(() => {});
     }, 300);
     return () => { clearTimeout(tid); abortRef.current?.abort(); };
   }, [prefixes, backend]);
 
-  const submit = async (startNow: boolean) => {
+  const submit = async () => {
     if (validPrefixes.length === 0) return;
     setSubmitting(true); setError('');
-    try {
-      await api.createJob({ name: name || undefined, prefixes: validPrefixes, backend, max_attempts: maxAttempts ? Number(maxAttempts) : undefined, max_runtime: maxRuntime ? Number(maxRuntime) : undefined, notes: notes || undefined });
-      nav('/queue');
-    } catch (e: any) { setError(e.message); setSubmitting(false); }
+    try { await api.createJob({ name: name || undefined, prefixes: validPrefixes, backend, max_attempts: maxAttempts ? Number(maxAttempts) : undefined, max_runtime: maxRuntime ? Number(maxRuntime) : undefined, notes: notes || undefined }); nav('/queue'); }
+    catch (e: any) { setError(e.message); setSubmitting(false); }
   };
 
   return (
     <div>
-      <div className="content-header"><h1>New Job</h1></div>
+      <div className="content-header"><h1>New Search</h1></div>
       {error && <div className="error-banner">{error}</div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, alignItems: 'start' }}>
-        {/* Left: form */}
-        <div className="panel">
+      <div className="grid grid-2">
+        <div className="glass-card">
           <div className="form-group">
             <label className="form-label">Hex Prefix(es)</label>
-            <input className="form-input mono" placeholder="e.g. C0DE BEEF or C0DEBA5ED" value={prefixes} onChange={e => setPrefixes(e.target.value)} />
-            <div className="form-hint">Separate multiple prefixes with spaces or commas</div>
+            <input className="form-input mono" placeholder="e.g. C0DE BEEF or C0DEBA5ED" value={prefixes} onChange={e => setPrefixes(e.target.value)} style={{ fontSize: 14, fontFamily: 'var(--font-mono)', letterSpacing: 1 }} />
+            <div className="form-hint">Separate with spaces or commas</div>
           </div>
-          {hasError && <div className="error-banner">Invalid hex: {prefixList.filter(p => !/^[0-9A-F]+$/.test(p)).join(', ')}</div>}
-          <div className="form-group">
-            <label className="form-label">Name (optional)</label>
-            <input className="form-input" value={name} onChange={e => setName(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Backend</label>
-            <select className="form-input" value={backend} onChange={e => setBackend(e.target.value)}>
-              <option value="cpu">CPU</option>
-              <option value="cuda">CUDA GPU</option>
-            </select>
-          </div>
+          {hasError && <div className="error-banner" style={{ marginTop: 8 }}>Invalid hex: {prefixList.filter(p => !/^[0-9A-F]+$/.test(p)).join(', ')}</div>}
+          <div className="form-group"><label className="form-label">Name</label><input className="form-input" value={name} onChange={e => setName(e.target.value)} placeholder="Optional" /></div>
+          <div className="form-group"><label className="form-label">Backend</label><select className="form-input" value={backend} onChange={e => setBackend(e.target.value)}><option value="cpu">CPU</option><option value="cuda">CUDA GPU</option></select></div>
           <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">Max Attempts</label>
-              <input className="form-input mono" type="number" value={maxAttempts} onChange={e => setMaxAttempts(e.target.value)} placeholder="Unlimited" />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Max Runtime (s)</label>
-              <input className="form-input mono" type="number" value={maxRuntime} onChange={e => setMaxRuntime(e.target.value)} placeholder="Unlimited" />
-            </div>
+            <div className="form-group"><label className="form-label">Max Attempts</label><input className="form-input mono" type="number" value={maxAttempts} onChange={e => setMaxAttempts(e.target.value)} placeholder="Unlimited" /></div>
+            <div className="form-group"><label className="form-label">Max Runtime (s)</label><input className="form-input mono" type="number" value={maxRuntime} onChange={e => setMaxRuntime(e.target.value)} placeholder="Unlimited" /></div>
           </div>
-          <div className="form-group">
-            <label className="form-label">Notes</label>
-            <input className="form-input" value={notes} onChange={e => setNotes(e.target.value)} />
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-            <button className="primary" onClick={() => submit(false)} disabled={validPrefixes.length === 0 || submitting}>
-              {submitting ? 'Creating...' : 'Create & Queue'}
-            </button>
-          </div>
+          <div className="form-group"><label className="form-label">Notes</label><input className="form-input" value={notes} onChange={e => setNotes(e.target.value)} /></div>
+          <button className="primary" onClick={submit} disabled={validPrefixes.length === 0 || submitting} style={{ marginTop: 8 }}>
+            {submitting ? 'Creating...' : 'Create & Queue'}
+          </button>
         </div>
 
-        {/* Right: estimate */}
-        <div className="panel" style={{ position: 'sticky', top: 12 }}>
+        <div className="glass-card" style={{ position: 'sticky', top: 16 }}>
           <div className="panel-header"><span className="panel-title">Live Estimate</span></div>
           {estimate ? (
             <>
-              {validPrefixes.map(p => <div key={p} style={{ marginBottom: 6 }}><PrefixBadge prefix={p} /></div>)}
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{estimate.backend}{estimate.device ? ` · ${estimate.device}` : ''}</div>
-              <div className="grid grid-2" style={{ marginTop: 12 }}>
-                <div><span className="text-muted" style={{ fontSize: 11 }}>Expected</span><div className="tabular">{formatNum(estimate.expected_attempts)}</div></div>
-                <div><span className="text-muted" style={{ fontSize: 11 }}>Keys/s</span><div className="tabular">{formatKps(estimate.keys_per_second)}</div></div>
-                <div><span className="text-muted" style={{ fontSize: 11 }}>50%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_50pct_seconds} /></div></div>
-                <div><span className="text-muted" style={{ fontSize: 11 }}>90%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_90pct_seconds} /></div></div>
-                <div><span className="text-muted" style={{ fontSize: 11 }}>95%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_95pct_seconds} /></div></div>
-                <div><span className="text-muted" style={{ fontSize: 11 }}>99%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_99pct_seconds} /></div></div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                {validPrefixes.map(p => <PrefixBadge key={p} prefix={p} />)}
               </div>
-              {estimate.prefix_length >= 9 && (
-                <div className="error-banner" style={{ background: 'var(--amber-dim)', borderColor: 'var(--amber)', color: 'var(--amber)', marginTop: 12 }}>
-                  {estimate.prefix_length}-char prefix — {formatNum(estimate.expected_attempts)} attempts expected
-                </div>
-              )}
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 14 }}>{estimate.backend}{estimate.device ? ` · ${estimate.device}` : ''}</div>
+              <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>Expected</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(estimate.expected_attempts)}</div></div>
+                <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>Keys/s</span><div className="tabular" style={{ fontWeight: 600 }}>{formatKps(estimate.keys_per_second)}</div></div>
+                <div style={{ marginTop: 8 }}><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>50%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_50pct_seconds} /></div></div>
+                <div style={{ marginTop: 8 }}><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>90%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_90pct_seconds} /></div></div>
+                <div style={{ marginTop: 8 }}><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>95%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_95pct_seconds} /></div></div>
+                <div style={{ marginTop: 8 }}><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>99%</span><div className="tabular"><TimeDisplay seconds={estimate.milestone_99pct_seconds} /></div></div>
+              </div>
+              {estimate.prefix_length >= 9 && <WarningBanner message={`${estimate.prefix_length}-char prefix — ${formatNum(estimate.expected_attempts)} expected attempts`} />}
             </>
           ) : (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>
-              Type a hex prefix to see live estimates
-            </div>
+            <div className="empty-state"><div className="icon">⧩</div><div className="title">Enter a prefix</div><div className="desc">Type a hex prefix above to see live time estimates based on benchmarks</div></div>
           )}
         </div>
       </div>
