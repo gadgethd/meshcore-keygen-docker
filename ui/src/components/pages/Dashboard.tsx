@@ -17,7 +17,7 @@ export default function Dashboard() {
   }, []);
 
   const job = s?.active_job;
-  const minLen = job ? Math.min(...job.prefixes.map(p => p.length)) : 0;
+  const minLen = job && job.prefixes.length > 0 ? Math.min(...job.prefixes.map(p => p.length)) : 0;
   const expected = 16 ** minLen;
   const prob = job ? 1 - Math.exp(-job.attempts_done / Math.max(expected, 1)) : 0;
 

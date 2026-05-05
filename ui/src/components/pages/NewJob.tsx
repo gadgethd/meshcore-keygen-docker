@@ -17,8 +17,15 @@ export default function NewJob() {
   const abortRef = useRef<AbortController | null>(null);
 
   const prefixList = prefixes.split(/[\s,]+/).filter(Boolean).map(p => p.toUpperCase());
+  const nonHex = prefixList.filter(p => !/^[0-9A-F]+$/.test(p));
+  const reserved = prefixList.filter(p => /^[0-9A-F]+$/.test(p) && (p.startsWith('00') || p.startsWith('FF')));
+  const tooLong = prefixList.filter(p => /^[0-9A-F]+$/.test(p) && p.length > 64);
   const validPrefixes = prefixList.filter(p => /^[0-9A-F]+$/.test(p) && p.length <= 64 && !p.startsWith('00') && !p.startsWith('FF'));
-  const hasError = prefixList.length > 0 && validPrefixes.length !== prefixList.length;
+  const errors: string[] = [];
+  if (nonHex.length > 0) errors.push(`Invalid hex: ${nonHex.join(', ')}`);
+  if (reserved.length > 0) errors.push(`Reserved prefix (00/FF): ${reserved.join(', ')}`);
+  if (tooLong.length > 0) errors.push(`Too long (>64): ${tooLong.join(', ')}`);
+  const hasError = errors.length > 0;
 
   useEffect(() => {
     if (validPrefixes.length === 0) { setEstimate(null); return; }
@@ -49,7 +56,7 @@ export default function NewJob() {
             <input className="form-input mono" placeholder="e.g. C0DE BEEF or C0DEBA5ED" value={prefixes} onChange={e => setPrefixes(e.target.value)} style={{ fontSize: 14, fontFamily: 'var(--font-mono)', letterSpacing: 1 }} />
             <div className="form-hint">Separate with spaces or commas</div>
           </div>
-          {hasError && <div className="error-banner" style={{ marginTop: 8 }}>Invalid hex: {prefixList.filter(p => !/^[0-9A-F]+$/.test(p)).join(', ')}</div>}
+          {hasError && errors.map((e, i) => <div key={i} className="error-banner" style={{ marginTop: i > 0 ? 4 : 8, marginBottom: 8 }}>{e}</div>)}
           <div className="form-group"><label className="form-label">Name</label><input className="form-input" value={name} onChange={e => setName(e.target.value)} placeholder="Optional" /></div>
           <div className="form-group"><label className="form-label">Backend</label><select className="form-input" value={backend} onChange={e => setBackend(e.target.value)}><option value="cpu">CPU</option><option value="cuda">CUDA GPU</option></select></div>
           <div className="form-row">

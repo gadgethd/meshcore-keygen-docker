@@ -150,7 +150,7 @@ impl SearchHandle {
                 let mut seed = [0u8; 32];
                 let mut local_count: u64 = 0;
 
-                while !found.load(Ordering::Relaxed) {
+                while !found.load(Ordering::Acquire) {
                     OsRng.fill_bytes(&mut seed);
                     let kp = generate_keypair(&seed);
                     local_count += 1;
@@ -166,7 +166,7 @@ impl SearchHandle {
                     if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
                     {
                         total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                        found.store(true, Ordering::Relaxed);
+                        found.store(true, Ordering::Release);
                         *result.lock().unwrap() = Some(MatchResult {
                             keypair: kp,
                             matched_prefix: matched.0.clone(),
@@ -196,7 +196,7 @@ impl SearchHandle {
 
     /// Check if a match has been found.
     pub fn is_done(&self) -> bool {
-        self.found.load(Ordering::Relaxed)
+        self.found.load(Ordering::Acquire)
     }
 
     /// Get current search statistics.
@@ -290,7 +290,7 @@ impl SearchHandle {
                     let mut local_state = worker_state;
                     let mut local_count: u64 = 0;
 
-                    while !found.load(Ordering::Relaxed) {
+                    while !found.load(Ordering::Acquire) {
                         let seed = local_state.next_seed();
                         let kp = generate_keypair(&seed);
                         local_count += 1;
@@ -307,7 +307,7 @@ impl SearchHandle {
                             matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
                         {
                             total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                            found.store(true, Ordering::Relaxed);
+                            found.store(true, Ordering::Release);
                             *result.lock().unwrap() = Some(MatchResult {
                                 keypair: kp,
                                 matched_prefix: matched.0.clone(),
@@ -482,7 +482,7 @@ impl SearchHandle {
                 let mut seed = [0u8; 32];
                 let mut local_count: u64 = 0;
 
-                while !found.load(Ordering::Relaxed) {
+                while !found.load(Ordering::Acquire) {
                     OsRng.fill_bytes(&mut seed);
                     let kp = generate_keypair(&seed);
                     local_count += 1;
@@ -498,7 +498,7 @@ impl SearchHandle {
                     if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
                     {
                         total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                        found.store(true, Ordering::Relaxed);
+                        found.store(true, Ordering::Release);
                         *result.lock().unwrap() = Some(MatchResult {
                             keypair: kp,
                             matched_prefix: matched.0.clone(),

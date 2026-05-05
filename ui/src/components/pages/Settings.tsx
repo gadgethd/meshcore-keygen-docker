@@ -39,7 +39,7 @@ export default function Settings() {
           <div className="panel-header"><span className="panel-title">Backend & CPU</span></div>
           <Field label="Default Backend" v={s.default_backend} set={v => update('default_backend', v)} />
           <Field label="Reserved CPU Cores" v={s.reserved_cpu_cores} set={v => update('reserved_cpu_cores', Number(v))} type="number" />
-          <Field label="Max Worker Threads" v={s.max_worker_threads ?? ''} set={v => update('max_worker_threads', v ? Number(v) : null)} type="number" placeholder="Auto" />
+          <Field label="Max Worker Threads" v={s.max_worker_threads ?? ''} set={v => update('max_worker_threads', v !== '' ? Number(v) : null)} type="number" placeholder="Auto" />
           <Field label="Checkpoint Interval (s)" v={s.checkpoint_interval_secs} set={v => update('checkpoint_interval_secs', Number(v))} type="number" />
         </div>
         <div className="glass-card">

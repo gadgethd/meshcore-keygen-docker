@@ -6,7 +6,7 @@ export default function Results() {
   const [results, setResults] = useState<Result[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => { const load = () => api.results().then(r => { setResults(r); setLoading(false); }).catch(() => {}); load(); const i = setInterval(load, 10000); return () => clearInterval(i); }, []);
+  useEffect(() => { const load = () => api.results().then(r => { setResults(r); setLoading(false); }).catch(() => setLoading(false)); load(); const i = setInterval(load, 10000); return () => clearInterval(i); }, []);
 
   return (
     <div>
@@ -32,6 +32,12 @@ export default function Results() {
               <span className="text-muted">Public:</span> {r.public_key.slice(0, 16)}...{r.public_key.slice(-4)} <CopyButton text={r.public_key} />
             </div>
             <SecretField value={r.private_key} label="Private Key" />
+            <div style={{ marginTop: 8 }}>
+              <button className="danger" style={{ fontSize: 11, padding: '3px 10px' }}
+                onClick={() => { if (confirm('Delete this result?')) { api.deleteResult(r.id).then(() => setResults(prev => prev.filter(x => x.id !== r.id))).catch(() => {}); } }}>
+                Delete
+              </button>
+            </div>
           </div>
         ))
       )}

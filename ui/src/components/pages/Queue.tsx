@@ -8,9 +8,9 @@ export default function Queue() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const load = () => api.jobs().then(j => { setJobs(j); setLoading(false); setError(''); }).catch(e => setError(e.message));
+  const load = () => api.jobs().then(j => { setJobs(j); setLoading(false); setError(''); }).catch(e => { setError(e.message); setLoading(false); });
   useEffect(() => { load(); const i = setInterval(load, 5000); return () => clearInterval(i); }, []);
-  const act = async (fn: () => Promise<any>) => { setError(''); try { await fn(); load(); } catch (e: any) { setError(e.message); } };
+  const act = async (fn: () => Promise<any>) => { setError(''); try { await fn(); await load(); } catch (e: any) { setError(e.message); } };
 
   const counts = { queued: jobs.filter(j => j.status === 'queued').length, running: jobs.filter(j => j.status === 'running').length, paused: jobs.filter(j => j.status === 'paused').length, completed: jobs.filter(j => j.status === 'completed').length };
 

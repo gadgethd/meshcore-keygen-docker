@@ -174,6 +174,14 @@ async fn pause(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Job>, StatusCode> {
+    // Signal the queue manager to cancel
+    if let Ok(lock) = state.active_job_id.lock() {
+        if lock.as_deref() == Some(&id) {
+            state
+                .active_job_cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let db = state
         .db
         .lock()
@@ -198,7 +206,7 @@ async fn resume(
     let mut job = crate::server::db::get_job(&db, &id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    job.status = JobStatus::Running;
+    job.status = JobStatus::Queued;
     job.updated_at = now_str();
     crate::server::db::update_job(&db, &job).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(job))
@@ -208,6 +216,14 @@ async fn stop(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Job>, StatusCode> {
+    // Signal the queue manager to cancel
+    if let Ok(lock) = state.active_job_id.lock() {
+        if lock.as_deref() == Some(&id) {
+            state
+                .active_job_cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let db = state
         .db
         .lock()
@@ -229,10 +245,14 @@ async fn restart(
         .db
         .lock()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut job = crate::server::db::get_job(&db, &id)
+    let job = crate::server::db::get_job(&db, &id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    // New master seed for restart
+    // Reject restart if job is currently running
+    if job.status == JobStatus::Running {
+        return Err(StatusCode::CONFLICT);
+    }
+    let mut job = job;
     job.master_seed = None;
     job.next_counter = None;
     job.attempts_done = 0;

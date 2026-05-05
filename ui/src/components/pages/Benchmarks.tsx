@@ -33,6 +33,7 @@ export default function Benchmarks() {
     const poll = async () => {
       try {
         const r = await fetch('/api/benchmarks/active');
+        if (r.status === 204 || r.headers.get('content-length') === '0') { setActive(null); setRunning(false); return; }
         const a: ActiveBenchmark | null = await r.json();
         setActive(a);
         if (!a) setRunning(false);

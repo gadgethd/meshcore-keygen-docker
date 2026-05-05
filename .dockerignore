@@ -21,3 +21,9 @@ Thumbs.db
 *.swo
 *~
 tmp/
+docs/
+.github/
+.claude/
+metal/
+README.md
+LICENSE-*

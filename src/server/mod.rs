@@ -38,7 +38,11 @@ pub async fn run(bind: &str, db_path: &str) -> Result<(), Box<dyn std::error::Er
     let (state, _shutdown_rx) = AppState::new(pool.clone());
 
     // Start queue manager in background
-    let qm = queue::QueueManager::new(pool);
+    let qm = queue::QueueManager::new(
+        pool,
+        state.active_job_cancel.clone(),
+        state.active_job_id.clone(),
+    );
     tokio::spawn(async move {
         qm.run().await;
     });

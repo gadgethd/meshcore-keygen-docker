@@ -24,6 +24,8 @@ pub struct AppState {
     pub shutdown_tx: broadcast::Sender<()>,
     pub active_benchmark: Arc<Mutex<Option<ActiveBenchmark>>>,
     pub cancel_benchmark: Arc<AtomicBool>,
+    pub active_job_cancel: Arc<AtomicBool>,
+    pub active_job_id: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -35,6 +37,8 @@ impl AppState {
                 shutdown_tx,
                 active_benchmark: Arc::new(Mutex::new(None)),
                 cancel_benchmark: Arc::new(AtomicBool::new(false)),
+                active_job_cancel: Arc::new(AtomicBool::new(false)),
+                active_job_id: Arc::new(Mutex::new(None)),
             }),
             shutdown_rx,
         )
