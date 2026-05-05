@@ -3,7 +3,8 @@ const TIMEOUT = 15000;
 
 async function req<T>(url: string, options?: RequestInit): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, TIMEOUT);
   try {
     const res = await fetch(BASE + url, {
       signal: controller.signal,
@@ -13,9 +14,16 @@ async function req<T>(url: string, options?: RequestInit): Promise<T> {
     if (res.status === 204) return undefined as T;
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      throw new Error(body || `${res.status} ${res.statusText}`);
+      throw new Error(body || `HTTP ${res.status}`);
     }
     return res.json();
+  } catch (e: any) {
+    if (e?.name === 'AbortError') {
+      if (timedOut) throw new Error('Request timed out');
+      // Component unmounted or retry — silently skip
+      throw new Error('__aborted__');
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }

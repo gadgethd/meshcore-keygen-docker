@@ -10,7 +10,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     mounted.current = true;
-    const poll = () => api.status().then(v => { if (mounted.current) { setS(v); setError(''); } }).catch(e => { if (mounted.current) setError(e.message); });
+    const poll = () => api.status().then(v => { if (mounted.current) { setS(v); setError(''); } }).catch(e => { if (mounted.current && e?.message !== 'Request timed out' && e?.message !== '__aborted__') setError(e.message); });
     poll();
     const i = setInterval(poll, 2000);
     return () => { mounted.current = false; clearInterval(i); };
