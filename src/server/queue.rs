@@ -168,7 +168,8 @@ fn run_job_sync(
         vec![]
     };
 
-    let handle = if !gpu_searchers.is_empty() {
+    let has_gpu = !gpu_searchers.is_empty();
+    let handle = if has_gpu {
         SearchHandle::start_hybrid(&prefixes, num_threads, gpu_searchers)
     } else {
         SearchHandle::start_deterministic(
@@ -241,8 +242,19 @@ fn run_job_sync(
                     } else {
                         0.0
                     },
-                    backend: "cpu".to_string(),
-                    device: String::new(),
+                    backend: backend.clone(),
+                    device: if has_gpu {
+                        #[cfg(feature = "cuda")]
+                        {
+                            crate::gpu::detect_cuda().1.unwrap_or_default()
+                        }
+                        #[cfg(not(feature = "cuda"))]
+                        {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    },
                     created_at: chrono_now(),
                 };
                 let _ = dbmod::insert_result(&db, &record);
