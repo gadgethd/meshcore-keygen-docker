@@ -214,12 +214,6 @@ fn run_job_sync(
                 }
                 let _ = dbmod::update_job(&db, &j);
             }
-            logs::log(
-                db_pool,
-                "info",
-                Some(&job_id),
-                "Job stopped (limit reached or cancelled)",
-            );
         }
     }
 
