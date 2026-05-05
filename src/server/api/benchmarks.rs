@@ -138,11 +138,21 @@ fn run_benchmark_sync(
     let gpu_searchers: Vec<Box<dyn crate::search::GpuSearcher>> = if using_gpu {
         #[cfg(feature = "cuda")]
         {
-            crate::gpu::try_init_gpu(&prefixes)
+            let searchers = crate::gpu::try_init_gpu(&prefixes);
+            if searchers.is_empty() {
+                // Mark benchmark as failed/cancelled
+                let mut lock = active.lock().unwrap_or_else(|e| e.into_inner());
+                *lock = None;
+                eprintln!("Benchmark {} failed: CUDA GPU unavailable", id);
+                return;
+            }
+            searchers
         }
         #[cfg(not(feature = "cuda"))]
         {
-            vec![]
+            let mut lock = active.lock().unwrap_or_else(|e| e.into_inner());
+            *lock = None;
+            return;
         }
     } else {
         vec![]

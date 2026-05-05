@@ -72,6 +72,15 @@ fn lock_db(db: &DbPool) -> std::sync::MutexGuard<rusqlite::Connection> {
     db.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+fn mark_failed(db: &DbPool, job_id: &str, msg: &str) {
+    let db = lock_db(db);
+    if let Ok(Some(mut job)) = dbmod::get_job(&db, job_id) {
+        job.status = JobStatus::Failed;
+        job.notes = Some(msg.to_string());
+        let _ = dbmod::update_job(&db, &job);
+    }
+}
+
 fn run_job_sync(
     db: DbPool,
     running: Arc<TokioMutex<bool>>,
@@ -120,11 +129,21 @@ fn run_job_sync(
     let gpu_searchers: Vec<Box<dyn crate::search::GpuSearcher>> = if backend == "cuda" {
         #[cfg(feature = "cuda")]
         {
-            crate::gpu::try_init_gpu(&prefixes)
+            let searchers = crate::gpu::try_init_gpu(&prefixes);
+            if searchers.is_empty() {
+                mark_failed(&db, &job_id, "CUDA GPU unavailable — check that NVIDIA drivers and container toolkit are configured");
+                return;
+            }
+            searchers
         }
         #[cfg(not(feature = "cuda"))]
         {
-            vec![]
+            mark_failed(
+                &db,
+                &job_id,
+                "CUDA backend not available (binary built without cuda feature)",
+            );
+            return;
         }
     } else {
         vec![]
