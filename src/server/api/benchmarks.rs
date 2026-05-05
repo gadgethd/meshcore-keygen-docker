@@ -20,6 +20,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/benchmarks", axum::routing::get(list).post(create))
         .route("/api/benchmarks/active", axum::routing::get(active))
         .route("/api/benchmarks/run", axum::routing::post(run))
+        .route("/api/benchmarks/stop", axum::routing::post(stop))
         .route(
             "/api/benchmarks/{id}",
             axum::routing::delete(delete_benchmark),
@@ -81,6 +82,10 @@ async fn run(
 
     let state_clone = state.clone();
     let active = state.active_benchmark.clone();
+    let cancel = state.cancel_benchmark.clone();
+
+    // Reset cancel flag
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
 
     // Set initial active state
     {
@@ -101,6 +106,7 @@ async fn run(
         run_benchmark_sync(
             state_clone,
             active,
+            cancel,
             id_clone,
             target_clone,
             prefix_length,
@@ -119,25 +125,53 @@ async fn run(
 fn run_benchmark_sync(
     state: Arc<AppState>,
     active: Arc<Mutex<Option<ActiveBenchmark>>>,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
     id: String,
     target_prefix: String,
     prefix_length: u32,
     backend: String,
 ) {
     let prefixes = vec![target_prefix.clone()];
-    let deterministic_state = DeterministicState::new();
+
+    // Try GPU if CUDA is requested and available
+    let using_gpu = backend == "cuda";
+    let gpu_searchers: Vec<Box<dyn crate::search::GpuSearcher>> = if using_gpu {
+        #[cfg(feature = "cuda")]
+        {
+            crate::gpu::try_init_gpu(&prefixes)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get().saturating_sub(1).max(1))
         .unwrap_or(1);
 
-    let handle = SearchHandle::start_deterministic(
-        &prefixes,
-        deterministic_state,
-        num_threads,
-        None,
-        10,
-        false,
-    );
+    let has_gpu = !gpu_searchers.is_empty();
+    let handle = if has_gpu {
+        crate::search::SearchHandle::start_hybrid(&prefixes, num_threads, gpu_searchers)
+    } else {
+        let deterministic_state = crate::deterministic::DeterministicState::new();
+        crate::search::SearchHandle::start_deterministic(
+            &prefixes,
+            deterministic_state,
+            num_threads,
+            None,
+            10,
+            false,
+        )
+    };
+
+    let actual_backend = if has_gpu {
+        backend.clone()
+    } else {
+        "cpu".to_string()
+    };
 
     let start = Instant::now();
     let mut last_update = Instant::now();
@@ -146,7 +180,9 @@ fn run_benchmark_sync(
         if handle.is_done() {
             break;
         }
-
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         if last_update.elapsed() >= std::time::Duration::from_millis(500) {
@@ -157,6 +193,7 @@ fn run_benchmark_sync(
                 a.attempts = stats.attempts;
                 a.keys_per_second = stats.keys_per_sec;
                 a.elapsed_seconds = stats.elapsed_secs;
+                a.backend = actual_backend.clone();
             }
         }
     }
@@ -170,13 +207,11 @@ fn run_benchmark_sync(
         0.0
     };
 
-    // Clear active state
     {
         let mut lock = active.lock().unwrap_or_else(|e| e.into_inner());
         *lock = None;
     }
 
-    // Save benchmark result to DB
     {
         let db = state.db.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::cpu::CpuConfig::detect();
@@ -184,8 +219,19 @@ fn run_benchmark_sync(
         let bm = BenchmarkRecord {
             id: id.clone(),
             created_at: chrono_now(),
-            backend: backend.clone(),
-            device: String::new(),
+            backend: actual_backend,
+            device: if has_gpu && using_gpu {
+                #[cfg(feature = "cuda")]
+                {
+                    crate::gpu::detect_cuda().1.unwrap_or_default()
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    String::new()
+                }
+            } else {
+                String::new()
+            },
             prefix_length,
             target_prefix,
             attempts: stats.attempts,
@@ -201,8 +247,14 @@ fn run_benchmark_sync(
         let _ = crate::server::db::insert_benchmark(&db, &bm);
     }
 
-    // Handle result cleanup
     let _ = handle.finish();
+}
+
+async fn stop(State(state): State<Arc<AppState>>) -> StatusCode {
+    state
+        .cancel_benchmark
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    StatusCode::OK
 }
 
 async fn active(State(state): State<Arc<AppState>>) -> Json<Option<ActiveBenchmark>> {

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -22,6 +23,7 @@ pub struct AppState {
     pub db: DbPool,
     pub shutdown_tx: broadcast::Sender<()>,
     pub active_benchmark: Arc<Mutex<Option<ActiveBenchmark>>>,
+    pub cancel_benchmark: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -32,6 +34,7 @@ impl AppState {
                 db,
                 shutdown_tx,
                 active_benchmark: Arc::new(Mutex::new(None)),
+                cancel_benchmark: Arc::new(AtomicBool::new(false)),
             }),
             shutdown_rx,
         )

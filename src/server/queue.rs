@@ -77,7 +77,7 @@ fn run_job_sync(
     running: Arc<TokioMutex<bool>>,
     job_id: String,
     prefixes: Vec<String>,
-    _backend: String,
+    backend: String,
     max_attempts: Option<u64>,
     max_runtime: Option<u64>,
 ) {
@@ -116,14 +116,32 @@ fn run_job_sync(
         .map(|n| n.get().saturating_sub(1).max(1))
         .unwrap_or(1);
 
-    let handle = SearchHandle::start_deterministic(
-        &prefixes,
-        deterministic_state,
-        num_threads,
-        checkpoint_path,
-        10,
-        false,
-    );
+    // Try GPU if CUDA backend and available
+    let gpu_searchers: Vec<Box<dyn crate::search::GpuSearcher>> = if backend == "cuda" {
+        #[cfg(feature = "cuda")]
+        {
+            crate::gpu::try_init_gpu(&prefixes)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    let handle = if !gpu_searchers.is_empty() {
+        SearchHandle::start_hybrid(&prefixes, num_threads, gpu_searchers)
+    } else {
+        SearchHandle::start_deterministic(
+            &prefixes,
+            deterministic_state,
+            num_threads,
+            checkpoint_path,
+            10,
+            false,
+        )
+    };
 
     let start = Instant::now();
     let mut last_update = Instant::now();

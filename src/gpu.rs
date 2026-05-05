@@ -62,6 +62,17 @@ pub fn detect_cuda() -> (bool, Option<String>) {
     }
 }
 
+/// Initialize GPU searchers for the given prefixes. Returns Vec of searchers on success.
+pub fn try_init_gpu(prefixes: &[String]) -> Vec<Box<dyn crate::search::GpuSearcher>> {
+    match CudaSearcher::new(prefixes) {
+        Ok(s) => vec![Box::new(s) as Box<dyn crate::search::GpuSearcher>],
+        Err(e) => {
+            eprintln!("Warning: CUDA GPU unavailable ({}), using CPU only", e);
+            vec![]
+        }
+    }
+}
+
 /// Compile the kernel and return (module, context, stream).
 fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), CudaError> {
     let ctx = CudaContext::new(0).map_err(|e| {

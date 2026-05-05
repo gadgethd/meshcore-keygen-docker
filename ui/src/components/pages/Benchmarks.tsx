@@ -57,6 +57,10 @@ export default function Benchmarks() {
     }
   };
 
+  const stopBenchmark = async () => {
+    try { await fetch('/api/benchmarks/stop', { method: 'POST' }); } catch {}
+  };
+
   return (
     <div>
       <div className="content-header">
@@ -85,6 +89,7 @@ export default function Benchmarks() {
           <button className="primary" onClick={startBenchmark} disabled={running} style={{ marginBottom: 0 }}>
             {running ? 'Running...' : 'Start Benchmark'}
           </button>
+          {running && <button className="danger" onClick={stopBenchmark} style={{ marginBottom: 0 }}>Stop</button>}
         </div>
       </div>
 
