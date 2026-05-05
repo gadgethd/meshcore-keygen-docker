@@ -1,6 +1,7 @@
 pub mod benchmarks;
 pub mod estimate;
 pub mod jobs;
+pub mod logs;
 pub mod results;
 pub mod settings;
 pub mod ws;
@@ -16,5 +17,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(results::router())
         .merge(estimate::router())
         .merge(benchmarks::router())
+        .merge(logs::router())
         .merge(settings::router())
 }

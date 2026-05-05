@@ -105,6 +105,9 @@ pub struct UpdateJobRequest {
     pub max_attempts: Option<u64>,
     pub max_runtime: Option<u64>,
     pub notes: Option<String>,
+    pub schedule_enabled: Option<bool>,
+    pub schedule_start: Option<String>,
+    pub schedule_end: Option<String>,
 }
 
 async fn update(
@@ -145,6 +148,15 @@ async fn update(
     }
     if let Some(notes) = req.notes {
         job.notes = Some(notes);
+    }
+    if let Some(enabled) = req.schedule_enabled {
+        job.schedule_enabled = enabled;
+    }
+    if req.schedule_start.is_some() {
+        job.schedule_start = req.schedule_start;
+    }
+    if req.schedule_end.is_some() {
+        job.schedule_end = req.schedule_end;
     }
     job.updated_at = now_str();
 
