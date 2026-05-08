@@ -6,7 +6,7 @@ use std::time::Instant;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use crate::keygen::generate_keypair;
+use crate::keygen::generate_keypair_from_random_bytes;
 use crate::types::{MeshCoreKeypair, SearchError, SearchResult, SearchStats};
 
 const BATCH_SIZE: u64 = 1024;
@@ -139,12 +139,14 @@ impl SearchHandle {
             let result = Arc::clone(&result);
 
             workers.push(thread::spawn(move || {
-                let mut seed = [0u8; 32];
+                let mut scalar_src = [0u8; 32];
+                let mut prefix = [0u8; 32];
                 let mut local_count: u64 = 0;
 
                 while !found.load(Ordering::Relaxed) {
-                    OsRng.fill_bytes(&mut seed);
-                    let kp = generate_keypair(&seed);
+                    OsRng.fill_bytes(&mut scalar_src);
+                    OsRng.fill_bytes(&mut prefix);
+                    let kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
                     local_count += 1;
 
                     if local_count % BATCH_SIZE == 0 {
@@ -287,12 +289,14 @@ impl SearchHandle {
             let result = Arc::clone(&result);
 
             workers.push(thread::spawn(move || {
-                let mut seed = [0u8; 32];
+                let mut scalar_src = [0u8; 32];
+                let mut prefix = [0u8; 32];
                 let mut local_count: u64 = 0;
 
                 while !found.load(Ordering::Relaxed) {
-                    OsRng.fill_bytes(&mut seed);
-                    let kp = generate_keypair(&seed);
+                    OsRng.fill_bytes(&mut scalar_src);
+                    OsRng.fill_bytes(&mut prefix);
+                    let kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
                     local_count += 1;
 
                     if local_count % BATCH_SIZE == 0 {

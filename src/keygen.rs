@@ -42,10 +42,9 @@ pub fn generate_keypair(seed: &[u8; 32]) -> MeshCoreKeypair {
 /// of the expanded private key, fed into the signing nonce hash).
 ///
 /// This skips the SHA-512 derivation step in `generate_keypair`, since the seed
-/// it would expand from is not exposed. Used by the GPU search path where the
-/// 64 bytes come from Philox(key, counter); host-side verification must use the
-/// same path to reproduce GPU output.
-#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+/// it would expand from is not exposed. Used by both the CPU search loop (with
+/// bytes drawn directly from `OsRng`) and the GPU search path (with bytes from
+/// Philox(key, counter)).
 pub fn generate_keypair_from_random_bytes(
     scalar_src: &[u8; 32],
     prefix: &[u8; 32],
