@@ -13,7 +13,7 @@
 //   BSD 3-Clause license (see cuda/THIRD-PARTY-NOTICES for full text)
 //
 // This is an altered source version adapted for NVRTC single-file
-// compilation. SHA-512 and vanity search kernels are original work.
+// compilation. Philox4x64-10 and vanity search kernels are original work.
 // ============================================================================
 
 // NVRTC doesn't have stdint.h, define types inline

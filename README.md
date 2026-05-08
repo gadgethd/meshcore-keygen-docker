@@ -58,10 +58,11 @@ CUDA support requires the NVIDIA CUDA Toolkit. Metal support requires macOS with
 
 ## How it works
 
-1. Generate random 32-byte seed
-2. SHA-512 hash, clamp scalar (per Ed25519 spec), derive public key
-3. Check if public key hex starts with the target prefix
-4. Repeat across all cores (or GPU threads) until a match is found
+1. Draw 64 random bytes — directly from the OS CSPRNG on CPU, or from Philox4x64-10 keyed by 128 bits of OS entropy on GPU
+2. Clamp the first 32 bytes per the Ed25519 spec to form a scalar
+3. Multiply the Ed25519 base point by the scalar to derive the public key (the second 32 bytes become the signing-nonce prefix half of the expanded private key)
+4. Check if the public key hex starts with the target prefix
+5. Repeat across all cores (or GPU threads) until a match is found
 
 Keys starting with `00` or `FF` are skipped (reserved by MeshCore).
 
