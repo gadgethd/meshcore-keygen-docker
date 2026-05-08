@@ -3317,26 +3317,43 @@ __device__ __forceinline__ void philox_block32(u64 k0, u64 k1, u64 idx, u64 side
 // Verification kernel
 // ============================================================================
 
-// Generates `count` keypairs using Philox(key, idx=0..count, side=0|1).
-// Host can reproduce identical output via the matching Rust philox impl.
+// Single-threaded chain verifier. Walks the same sequential-scalar /
+// point-addition chain that vanity_search uses (one initial scalarmult,
+// then +8B per step) and writes the pubkey + scalar at every step. The
+// host compares against direct scalarmult via curve25519-dalek to confirm
+// both the initial mult AND the +8B chain stay in sync.
 extern "C" __global__ void verify_keygen(
-    unsigned long long key0, unsigned long long key1,
-    u8 *pubkeys, u8 *privkeys, unsigned int count)
+    const u8 *start_scalar_bytes,
+    u8 *pubkeys, u8 *scalars, unsigned int count)
 {
-    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= count) return;
-    u8 scalar_bytes[32];
-    u8 prefix[32];
-    philox_block32(key0, key1, (u64)tid, 0ULL, scalar_bytes);
-    philox_block32(key0, key1, (u64)tid, 1ULL, prefix);
-    u8 scalar[32];
-    for (int i = 0; i < 32; i++) scalar[i] = scalar_bytes[i];
-    scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    u8 my_scalar[32];
+    for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
+
     ge_p3 A;
-    ge_scalarmult_base(&A, scalar);
-    ge_p3_tobytes(pubkeys + tid * 32, &A);
-    for (int i = 0; i < 32; i++) privkeys[tid*64 + i] = scalar[i];
-    for (int i = 0; i < 32; i++) privkeys[tid*64 + 32 + i] = prefix[i];
+    ge_scalarmult_base(&A, my_scalar);
+
+    for (unsigned int i = 0; i < count; i++) {
+        ge_p3_tobytes(pubkeys + i * 32, &A);
+        for (int j = 0; j < 32; j++) scalars[i * 32 + j] = my_scalar[j];
+
+        // A += 8B (base[0][7] = 8B as ge_precomp)
+        ge_p1p1 r;
+        ge_madd(&r, &A, &base[0][7]);
+        ge_p1p1_to_p3(&A, &r);
+
+        // my_scalar += 8 (low-byte add with carry; stays clamped because we
+        // only touch bits >= 3 and the high-byte clamp bits won't roll for
+        // any plausible search length).
+        unsigned int sum = (unsigned int)my_scalar[0] + 8u;
+        my_scalar[0] = (u8)(sum & 0xFFu);
+        unsigned int carry = sum >> 8;
+        for (int j = 1; j < 32 && carry; j++) {
+            unsigned int s = (unsigned int)my_scalar[j] + carry;
+            my_scalar[j] = (u8)(s & 0xFFu);
+            carry = s >> 8;
+        }
+    }
 }
 
 // ============================================================================
@@ -3377,35 +3394,64 @@ __device__ int check_any_prefix(const u8 *pubkey, const u8 *prefix_data,
     return 0;
 }
 
+// Sequential-scalar search: each thread does ONE scalarmult to derive its
+// starting point, then increments by +8B (cheap point addition) per iter.
+// The scalar advances in lockstep so we still emit the correct private key
+// on a match. The host draws a fresh OsRng start_scalar (clamped) per batch.
 extern "C" __global__ void vanity_search(
     u8 *result, const u8 *prefix_data, unsigned int prefix_count,
-    unsigned long long key0, unsigned long long key1,
-    unsigned long long base_counter, unsigned long long iters_per_thread)
+    const u8 *start_scalar_bytes,
+    unsigned long long iters_per_thread)
 {
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Per-thread scalar = start + 8 * tid * iters_per_thread.
+    u8 my_scalar[32];
+    for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
+    {
+        unsigned long long offset = 8ULL * (unsigned long long)tid * iters_per_thread;
+        unsigned long long carry = 0;
+        for (int i = 0; i < 32; i++) {
+            unsigned long long byte_add = (i < 8) ? ((offset >> (i * 8)) & 0xFFULL) : 0ULL;
+            unsigned long long s = (unsigned long long)my_scalar[i] + byte_add + carry;
+            my_scalar[i] = (u8)(s & 0xFFULL);
+            carry = s >> 8;
+        }
+    }
+
+    ge_p3 A;
+    ge_scalarmult_base(&A, my_scalar);
+
     for (unsigned long long iter = 0; iter < iters_per_thread; iter++) {
         if (*((volatile unsigned int *)result) != 0) return;
-        unsigned long long idx = base_counter + (unsigned long long)tid * iters_per_thread + iter;
-        u8 scalar_bytes[32];
-        u8 prefix[32];
-        philox_block32(key0, key1, idx, 0ULL, scalar_bytes);
-        philox_block32(key0, key1, idx, 1ULL, prefix);
-        u8 scalar[32];
-        for (int i = 0; i < 32; i++) scalar[i] = scalar_bytes[i];
-        scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
-        ge_p3 A;
-        ge_scalarmult_base(&A, scalar);
+
         u8 pubkey[32];
         ge_p3_tobytes(pubkey, &A);
-        if (pubkey[0] == 0x00 || pubkey[0] == 0xFF) continue;
-        if (check_any_prefix(pubkey, prefix_data, prefix_count)) {
+
+        if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
+            && check_any_prefix(pubkey, prefix_data, prefix_count)) {
             unsigned int old = atomicCAS((unsigned int *)result, 0, 1);
             if (old == 0) {
                 for (int i = 0; i < 32; i++) result[4 + i] = pubkey[i];
-                for (int i = 0; i < 32; i++) result[36 + i] = scalar[i];
-                for (int i = 0; i < 32; i++) result[68 + i] = prefix[i];
+                for (int i = 0; i < 32; i++) result[36 + i] = my_scalar[i];
+                // Prefix half of the expanded private key is generated host-side
+                // on match (independent OsRng draw); not produced here.
             }
             return;
+        }
+
+        // Advance: A += 8B, my_scalar += 8.
+        ge_p1p1 r;
+        ge_madd(&r, &A, &base[0][7]);
+        ge_p1p1_to_p3(&A, &r);
+
+        unsigned int sum = (unsigned int)my_scalar[0] + 8u;
+        my_scalar[0] = (u8)(sum & 0xFFu);
+        unsigned int carry = sum >> 8;
+        for (int j = 1; j < 32 && carry; j++) {
+            unsigned int s = (unsigned int)my_scalar[j] + carry;
+            my_scalar[j] = (u8)(s & 0xFFu);
+            carry = s >> 8;
         }
     }
 }

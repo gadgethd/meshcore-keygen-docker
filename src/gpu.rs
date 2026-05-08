@@ -14,6 +14,28 @@ const KERNEL_SRC: &str = include_str!("../cuda/vanity_kernel.cu");
 const BLOCK_SIZE: u32 = 256;
 const ITERS_PER_THREAD: u64 = 64;
 
+/// Apply Ed25519 scalar clamp in place: zero low 3 bits of byte 0, zero
+/// bit 7 of byte 31, set bit 6 of byte 31.
+fn clamp_scalar(s: &mut [u8; 32]) {
+    s[0] &= 248;
+    s[31] &= 63;
+    s[31] |= 64;
+}
+
+/// Add `delta` (a u64, treated as the low 8 bytes of a 256-bit value) to the
+/// 32-byte little-endian scalar in place. Wraps mod 2^256.
+fn advance_scalar(s: &mut [u8; 32], delta: u64) {
+    let mut carry: u64 = delta;
+    for byte in s.iter_mut() {
+        let sum = (*byte as u64) + (carry & 0xFF);
+        *byte = (sum & 0xFF) as u8;
+        carry = (carry >> 8) + (sum >> 8);
+        if carry == 0 {
+            break;
+        }
+    }
+}
+
 /// Result from a single GPU batch launch.
 pub struct CudaBatchResult {
     pub keys_checked: u64,
@@ -29,10 +51,11 @@ pub struct CudaSearcher {
     prefix_data: Vec<u8>,
     prefix_count: u32,
     device_name: String,
-    /// Philox key, drawn fresh from OsRng per searcher. Provides 128 bits of
-    /// secret entropy that gates the entire (key, counter) -> keypair derivation.
-    key0: u64,
-    key1: u64,
+    /// Clamped 256-bit starting scalar. Each thread tests scalars
+    /// `start_scalar + 8 * (tid * iters + iter)`; after each batch the host
+    /// advances this by `8 * total_keys_checked` so successive batches cover
+    /// fresh territory. Drawn fresh from OsRng on construction.
+    start_scalar: [u8; 32],
 }
 
 /// GPU search errors.
@@ -130,10 +153,9 @@ impl CudaSearcher {
             .map(|n| format!("CUDA GPU ({})", n))
             .unwrap_or_else(|_| "CUDA GPU".to_string());
 
-        let mut key_bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut key_bytes);
-        let key0 = u64::from_le_bytes(key_bytes[0..8].try_into().unwrap());
-        let key1 = u64::from_le_bytes(key_bytes[8..16].try_into().unwrap());
+        let mut start_scalar = [0u8; 32];
+        OsRng.fill_bytes(&mut start_scalar);
+        clamp_scalar(&mut start_scalar);
 
         Ok(CudaSearcher {
             stream,
@@ -143,15 +165,16 @@ impl CudaSearcher {
             prefix_data,
             prefix_count,
             device_name,
-            key0,
-            key1,
+            start_scalar,
         })
     }
 
     /// Launch one batch of GPU kernel and check for results.
-    /// `base_counter` is the Philox counter offset; the searcher's key was
-    /// drawn from OsRng at construction.
-    pub fn search_batch(&mut self, base_counter: u64) -> Result<CudaBatchResult, CudaError> {
+    /// Uses the searcher's `start_scalar` (drawn from OsRng) and advances it
+    /// by `8 * keys_checked` after the launch so subsequent batches cover
+    /// fresh territory. The legacy `_base_nonce` arg is kept for trait
+    /// compatibility with the old (Philox) interface and ignored.
+    pub fn search_batch(&mut self, _base_nonce: u64) -> Result<CudaBatchResult, CudaError> {
         let total_threads = (self.grid_size * BLOCK_SIZE) as u64;
         let keys_checked = total_threads * ITERS_PER_THREAD;
 
@@ -162,6 +185,10 @@ impl CudaSearcher {
         let prefix_dev = self
             .stream
             .clone_htod(&self.prefix_data)
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+        let start_scalar_dev = self
+            .stream
+            .clone_htod(&self.start_scalar.to_vec())
             .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let cfg = LaunchConfig {
@@ -176,9 +203,7 @@ impl CudaSearcher {
                 .arg(&mut self.result_buf)
                 .arg(&prefix_dev)
                 .arg(&self.prefix_count)
-                .arg(&self.key0)
-                .arg(&self.key1)
-                .arg(&base_counter)
+                .arg(&start_scalar_dev)
                 .arg(&ITERS_PER_THREAD)
                 .launch(cfg)
         }
@@ -202,9 +227,17 @@ impl CudaSearcher {
 
         let keypair = if found_flag != 0 {
             let mut public_key = [0u8; 32];
-            let mut private_key = [0u8; 64];
             public_key.copy_from_slice(&result_host[4..36]);
-            private_key.copy_from_slice(&result_host[36..100]);
+            let mut scalar = [0u8; 32];
+            scalar.copy_from_slice(&result_host[36..68]);
+            // Prefix half of the expanded private key is just fresh random
+            // bytes -- there's no derivation requirement on it. The user
+            // gets one match per search, so a single OsRng draw here is fine.
+            let mut prefix = [0u8; 32];
+            OsRng.fill_bytes(&mut prefix);
+            let mut private_key = [0u8; 64];
+            private_key[..32].copy_from_slice(&scalar);
+            private_key[32..].copy_from_slice(&prefix);
             Some(MeshCoreKeypair {
                 public_key,
                 private_key,
@@ -212,6 +245,11 @@ impl CudaSearcher {
         } else {
             None
         };
+
+        // Advance start_scalar by 8 * keys_checked so the next batch covers
+        // fresh scalars. (Only meaningful if no match was found; harmless
+        // otherwise.)
+        advance_scalar(&mut self.start_scalar, 8u64.wrapping_mul(keys_checked));
 
         Ok(CudaBatchResult {
             keys_checked,
@@ -239,12 +277,13 @@ impl crate::search::GpuSearcher for CudaSearcher {
     }
 }
 
-/// Run GPU vs CPU verification: launch the verify kernel with a fixed Philox key,
-/// then reproduce the same Philox -> clamp -> scalarmult flow on the host and
-/// compare. Validates both the device Philox impl and device Ed25519 math.
+/// Run GPU vs CPU verification: launch the chain verifier with a fixed start
+/// scalar, then for each step `i`, compute `(start + 8*i)·B` directly via
+/// curve25519-dalek and compare. Validates the initial scalarmult AND that the
+/// `+8B` chain stays in lockstep across many iterations.
 pub fn verify_gpu_keygen() -> Result<(), CudaError> {
-    use crate::keygen::generate_keypair_from_random_bytes;
-    use crate::philox::philox_block32;
+    use curve25519_dalek::constants::ED25519_BASEPOINT_TABLE;
+    use curve25519_dalek::scalar::Scalar;
 
     let (module, stream) = compile_kernel()?;
 
@@ -252,31 +291,39 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
         .load_function("verify_keygen")
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
-    // Fixed key so the test is deterministic across runs.
-    let key0: u64 = 0x0123456789abcdef;
-    let key1: u64 = 0xfedcba9876543210;
+    // Fixed (clamped) start scalar so the test is deterministic.
+    let mut start_scalar = [0u8; 32];
+    start_scalar[0] = 0x10;
+    start_scalar[1] = 0x32;
+    start_scalar[2] = 0x54;
+    start_scalar[3] = 0x76;
+    start_scalar[31] = 0x12;
+    clamp_scalar(&mut start_scalar);
+
     let count: u32 = 64;
 
+    let start_scalar_dev = stream
+        .clone_htod(&start_scalar.to_vec())
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
     let mut pubkeys_dev = stream
         .alloc_zeros::<u8>(count as usize * 32)
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
-    let mut privkeys_dev = stream
-        .alloc_zeros::<u8>(count as usize * 64)
+    let mut scalars_dev = stream
+        .alloc_zeros::<u8>(count as usize * 32)
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     let cfg = LaunchConfig {
         grid_dim: (1, 1, 1),
-        block_dim: (count, 1, 1),
+        block_dim: (1, 1, 1),
         shared_mem_bytes: 0,
     };
 
     unsafe {
         stream
             .launch_builder(&verify_func)
-            .arg(&key0)
-            .arg(&key1)
+            .arg(&start_scalar_dev)
             .arg(&mut pubkeys_dev)
-            .arg(&mut privkeys_dev)
+            .arg(&mut scalars_dev)
             .arg(&count)
             .launch(cfg)
     }
@@ -289,43 +336,46 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
     let gpu_pubkeys: Vec<u8> = stream
         .clone_dtoh(&pubkeys_dev)
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
-    let gpu_privkeys: Vec<u8> = stream
-        .clone_dtoh(&privkeys_dev)
+    let gpu_scalars: Vec<u8> = stream
+        .clone_dtoh(&scalars_dev)
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
     let mut pass = 0;
     let mut fail = 0;
+    let mut expected_scalar = start_scalar;
     for i in 0..count as usize {
-        let scalar_src = philox_block32(key0, key1, i as u64, 0);
-        let prefix = philox_block32(key0, key1, i as u64, 1);
-        let cpu_kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
+        // Direct host-side scalarmult of expected_scalar.
+        let scalar = Scalar::from_bytes_mod_order(expected_scalar);
+        let cpu_pub = (&scalar * ED25519_BASEPOINT_TABLE).compress().to_bytes();
 
         let gpu_pub = &gpu_pubkeys[i * 32..(i + 1) * 32];
-        let gpu_priv = &gpu_privkeys[i * 64..(i + 1) * 64];
+        let gpu_scalar = &gpu_scalars[i * 32..(i + 1) * 32];
 
-        let pub_match = gpu_pub == cpu_kp.public_key;
-        let priv_match = gpu_priv == cpu_kp.private_key;
+        let pub_match = gpu_pub == cpu_pub;
+        let scalar_match = gpu_scalar == expected_scalar;
 
-        if pub_match && priv_match {
+        if pub_match && scalar_match {
             pass += 1;
         } else {
             fail += 1;
             eprintln!("MISMATCH idx #{}", i);
-            eprintln!("  CPU pubkey:  {}", hex::encode_upper(&cpu_kp.public_key));
+            eprintln!("  CPU pubkey:  {}", hex::encode_upper(cpu_pub));
             eprintln!("  GPU pubkey:  {}", hex::encode_upper(gpu_pub));
-            eprintln!("  CPU privkey: {}", hex::encode_upper(&cpu_kp.private_key));
-            eprintln!("  GPU privkey: {}", hex::encode_upper(gpu_priv));
+            eprintln!("  expected scalar: {}", hex::encode_upper(expected_scalar));
+            eprintln!("  GPU scalar:      {}", hex::encode_upper(gpu_scalar));
             if fail >= 5 {
                 eprintln!("  (stopping after 5 mismatches)");
                 break;
             }
         }
+
+        advance_scalar(&mut expected_scalar, 8);
     }
 
-    eprintln!("{}/{} keys matched (GPU vs CPU)", pass, count);
+    eprintln!("{}/{} chain steps matched (GPU vs CPU)", pass, count);
     if fail > 0 {
         Err(CudaError::CudaDriver(format!(
-            "{} of {} keys mismatched between GPU and CPU",
+            "{} of {} chain steps mismatched between GPU and CPU",
             fail, count
         )))
     } else {
