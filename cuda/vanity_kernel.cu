@@ -3259,108 +3259,84 @@ void __device__ ge_tobytes(unsigned char *s, const ge_p2 *h) {
 }
 
 // ============================================================================
-// SHA-512 (single block, 32-byte input)
+// Philox4x64-10 CSPRNG
+// Counter-based RNG (D.E. Shaw / Random123). 128-bit key + 256-bit counter
+// produce 256 bits of pseudorandom output per call. Output is hidden behind
+// Curve25519 DLog before any value is exposed, so the lack of formal CSPRNG
+// status is irrelevant for this use; we get 2^128 brute-force resistance from
+// the host-supplied OsRng key.
 // ============================================================================
 
 typedef unsigned long long u64;
 typedef unsigned int       u32_t;
 typedef unsigned char      u8;
 
-__constant__ u64 K512[80] = {
-    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL,
-    0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL,
-    0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL, 0xd807aa98a3030242ULL,
-    0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
-    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL,
-    0xc19bf174cf692694ULL, 0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL,
-    0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL, 0x2de92c6f592b0275ULL,
-    0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
-    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL,
-    0xbf597fc7beef0ee4ULL, 0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
-    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL, 0x27b70a8546d22ffcULL,
-    0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
-    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL,
-    0x92722c851482353bULL, 0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL,
-    0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL, 0xd192e819d6ef5218ULL,
-    0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
-    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL,
-    0x34b0bcb5e19b48a8ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL,
-    0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL, 0x748f82ee5defb2fcULL,
-    0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
-    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL,
-    0xc67178f2e372532bULL, 0xca273eceea26619cULL, 0xd186b8c721c0c207ULL,
-    0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL, 0x06f067aa72176fbaULL,
-    0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
-    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL,
-    0x431d67c49c100d4cULL, 0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL,
-    0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
-};
+// CUDA hardware 64x64 -> high 64 bits of the 128-bit product.
+extern "C" __device__ unsigned long long __umul64hi(unsigned long long, unsigned long long);
 
-__device__ __forceinline__ u64 rotr64(u64 x, int n) { return (x >> n) | (x << (64 - n)); }
-__device__ __forceinline__ u64 Sha_Ch(u64 x, u64 y, u64 z) { return (x & y) ^ (~x & z); }
-__device__ __forceinline__ u64 Sha_Maj(u64 x, u64 y, u64 z) { return (x & y) ^ (x & z) ^ (y & z); }
-__device__ __forceinline__ u64 Sha_Sigma0(u64 x) { return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39); }
-__device__ __forceinline__ u64 Sha_Sigma1(u64 x) { return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41); }
-__device__ __forceinline__ u64 sha_sigma0(u64 x) { return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7); }
-__device__ __forceinline__ u64 sha_sigma1(u64 x) { return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6); }
-
-__device__ __forceinline__ u64 load_be64(const u8 *p) {
-    return ((u64)p[0]<<56)|((u64)p[1]<<48)|((u64)p[2]<<40)|((u64)p[3]<<32)|
-           ((u64)p[4]<<24)|((u64)p[5]<<16)|((u64)p[6]<<8)|((u64)p[7]);
-}
-__device__ __forceinline__ void store_be64(u8 *p, u64 v) {
-    p[0]=(u8)(v>>56);p[1]=(u8)(v>>48);p[2]=(u8)(v>>40);p[3]=(u8)(v>>32);
-    p[4]=(u8)(v>>24);p[5]=(u8)(v>>16);p[6]=(u8)(v>>8);p[7]=(u8)v;
-}
-
-__device__ void sha512_32(u8 *out, const u8 *msg) {
-    u64 W[80];
-    W[0]=load_be64(msg); W[1]=load_be64(msg+8);
-    W[2]=load_be64(msg+16); W[3]=load_be64(msg+24);
-    W[4]=0x8000000000000000ULL;
-    for (int i = 5; i < 15; i++) W[i] = 0;
-    W[15] = 256;
-    for (int i = 16; i < 80; i++)
-        W[i] = sha_sigma1(W[i-2]) + W[i-7] + sha_sigma0(W[i-15]) + W[i-16];
-    u64 a=0x6a09e667f3bcc908ULL, b=0xbb67ae8584caa73bULL,
-        c=0x3c6ef372fe94f82bULL, dd=0xa54ff53a5f1d36f1ULL,
-        e=0x510e527fade682d1ULL, f=0x9b05688c2b3e6c1fULL,
-        g=0x1f83d9abfb41bd6bULL, h=0x5be0cd19137e2179ULL;
-    for (int i = 0; i < 80; i++) {
-        u64 T1 = h + Sha_Sigma1(e) + Sha_Ch(e,f,g) + K512[i] + W[i];
-        u64 T2 = Sha_Sigma0(a) + Sha_Maj(a,b,c);
-        h=g; g=f; f=e; e=dd+T1; dd=c; c=b; b=a; a=T1+T2;
+__device__ __forceinline__ void philox4x64_10(u64 ctr[4], u64 key[2]) {
+    const u64 M0 = 0xD2E7470EE14C6C93ULL;
+    const u64 M1 = 0xCA5A826395121157ULL;
+    const u64 W0 = 0x9E3779B97F4A7C15ULL;
+    const u64 W1 = 0xBB67AE8584CAA73BULL;
+    #pragma unroll
+    for (int r = 0; r < 10; r++) {
+        if (r > 0) { key[0] += W0; key[1] += W1; }
+        u64 hi0 = __umul64hi(M0, ctr[0]);
+        u64 lo0 = M0 * ctr[0];
+        u64 hi1 = __umul64hi(M1, ctr[2]);
+        u64 lo1 = M1 * ctr[2];
+        u64 n0 = hi1 ^ ctr[1] ^ key[0];
+        u64 n1 = lo1;
+        u64 n2 = hi0 ^ ctr[3] ^ key[1];
+        u64 n3 = lo0;
+        ctr[0] = n0; ctr[1] = n1; ctr[2] = n2; ctr[3] = n3;
     }
-    a+=0x6a09e667f3bcc908ULL; b+=0xbb67ae8584caa73bULL;
-    c+=0x3c6ef372fe94f82bULL; dd+=0xa54ff53a5f1d36f1ULL;
-    e+=0x510e527fade682d1ULL; f+=0x9b05688c2b3e6c1fULL;
-    g+=0x1f83d9abfb41bd6bULL; h+=0x5be0cd19137e2179ULL;
-    store_be64(out,a); store_be64(out+8,b);
-    store_be64(out+16,c); store_be64(out+24,dd);
-    store_be64(out+32,e); store_be64(out+40,f);
-    store_be64(out+48,g); store_be64(out+56,h);
+}
+
+// Produce 32 little-endian bytes from one Philox4x64-10 call.
+__device__ __forceinline__ void philox_block32(u64 k0, u64 k1, u64 idx, u64 side, u8 *out32) {
+    u64 key[2] = { k0, k1 };
+    u64 ctr[4] = { idx, side, 0, 0 };
+    philox4x64_10(ctr, key);
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        u64 v = ctr[i];
+        out32[i*8 + 0] = (u8)(v);
+        out32[i*8 + 1] = (u8)(v >> 8);
+        out32[i*8 + 2] = (u8)(v >> 16);
+        out32[i*8 + 3] = (u8)(v >> 24);
+        out32[i*8 + 4] = (u8)(v >> 32);
+        out32[i*8 + 5] = (u8)(v >> 40);
+        out32[i*8 + 6] = (u8)(v >> 48);
+        out32[i*8 + 7] = (u8)(v >> 56);
+    }
 }
 
 // ============================================================================
 // Verification kernel
 // ============================================================================
 
+// Generates `count` keypairs using Philox(key, idx=0..count, side=0|1).
+// Host can reproduce identical output via the matching Rust philox impl.
 extern "C" __global__ void verify_keygen(
-    const u8 *seeds, u8 *pubkeys, u8 *privkeys, unsigned int count)
+    unsigned long long key0, unsigned long long key1,
+    u8 *pubkeys, u8 *privkeys, unsigned int count)
 {
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= count) return;
-    const u8 *seed = seeds + tid * 32;
-    u8 hash[64];
-    sha512_32(hash, seed);
+    u8 scalar_bytes[32];
+    u8 prefix[32];
+    philox_block32(key0, key1, (u64)tid, 0ULL, scalar_bytes);
+    philox_block32(key0, key1, (u64)tid, 1ULL, prefix);
     u8 scalar[32];
-    for (int i = 0; i < 32; i++) scalar[i] = hash[i];
+    for (int i = 0; i < 32; i++) scalar[i] = scalar_bytes[i];
     scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
     ge_p3 A;
     ge_scalarmult_base(&A, scalar);
     ge_p3_tobytes(pubkeys + tid * 32, &A);
     for (int i = 0; i < 32; i++) privkeys[tid*64 + i] = scalar[i];
-    for (int i = 0; i < 32; i++) privkeys[tid*64 + 32 + i] = hash[32 + i];
+    for (int i = 0; i < 32; i++) privkeys[tid*64 + 32 + i] = prefix[i];
 }
 
 // ============================================================================
@@ -3403,19 +3379,19 @@ __device__ int check_any_prefix(const u8 *pubkey, const u8 *prefix_data,
 
 extern "C" __global__ void vanity_search(
     u8 *result, const u8 *prefix_data, unsigned int prefix_count,
-    unsigned long long base_nonce, unsigned long long iters_per_thread)
+    unsigned long long key0, unsigned long long key1,
+    unsigned long long base_counter, unsigned long long iters_per_thread)
 {
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
     for (unsigned long long iter = 0; iter < iters_per_thread; iter++) {
         if (*((volatile unsigned int *)result) != 0) return;
-        unsigned long long idx = base_nonce + (unsigned long long)tid * iters_per_thread + iter;
-        u8 seed[32];
-        for (int i = 0; i < 32; i++) seed[i] = 0;
-        for (int i = 0; i < 8; i++) seed[i] = (u8)(idx >> (i * 8));
-        u8 hash[64];
-        sha512_32(hash, seed);
+        unsigned long long idx = base_counter + (unsigned long long)tid * iters_per_thread + iter;
+        u8 scalar_bytes[32];
+        u8 prefix[32];
+        philox_block32(key0, key1, idx, 0ULL, scalar_bytes);
+        philox_block32(key0, key1, idx, 1ULL, prefix);
         u8 scalar[32];
-        for (int i = 0; i < 32; i++) scalar[i] = hash[i];
+        for (int i = 0; i < 32; i++) scalar[i] = scalar_bytes[i];
         scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
         ge_p3 A;
         ge_scalarmult_base(&A, scalar);
@@ -3427,7 +3403,7 @@ extern "C" __global__ void vanity_search(
             if (old == 0) {
                 for (int i = 0; i < 32; i++) result[4 + i] = pubkey[i];
                 for (int i = 0; i < 32; i++) result[36 + i] = scalar[i];
-                for (int i = 0; i < 32; i++) result[68 + i] = hash[32 + i];
+                for (int i = 0; i < 32; i++) result[68 + i] = prefix[i];
             }
             return;
         }

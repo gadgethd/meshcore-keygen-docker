@@ -4,6 +4,8 @@ use std::sync::Arc;
 use cudarc::driver::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
+use rand::rngs::OsRng;
+use rand::RngCore;
 
 use crate::search::PrefixMatcher;
 use crate::types::MeshCoreKeypair;
@@ -27,6 +29,10 @@ pub struct CudaSearcher {
     prefix_data: Vec<u8>,
     prefix_count: u32,
     device_name: String,
+    /// Philox key, drawn fresh from OsRng per searcher. Provides 128 bits of
+    /// secret entropy that gates the entire (key, counter) -> keypair derivation.
+    key0: u64,
+    key1: u64,
 }
 
 /// GPU search errors.
@@ -124,6 +130,11 @@ impl CudaSearcher {
             .map(|n| format!("CUDA GPU ({})", n))
             .unwrap_or_else(|_| "CUDA GPU".to_string());
 
+        let mut key_bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut key_bytes);
+        let key0 = u64::from_le_bytes(key_bytes[0..8].try_into().unwrap());
+        let key1 = u64::from_le_bytes(key_bytes[8..16].try_into().unwrap());
+
         Ok(CudaSearcher {
             stream,
             func,
@@ -132,11 +143,15 @@ impl CudaSearcher {
             prefix_data,
             prefix_count,
             device_name,
+            key0,
+            key1,
         })
     }
 
     /// Launch one batch of GPU kernel and check for results.
-    pub fn search_batch(&mut self, base_nonce: u64) -> Result<CudaBatchResult, CudaError> {
+    /// `base_counter` is the Philox counter offset; the searcher's key was
+    /// drawn from OsRng at construction.
+    pub fn search_batch(&mut self, base_counter: u64) -> Result<CudaBatchResult, CudaError> {
         let total_threads = (self.grid_size * BLOCK_SIZE) as u64;
         let keys_checked = total_threads * ITERS_PER_THREAD;
 
@@ -161,7 +176,9 @@ impl CudaSearcher {
                 .arg(&mut self.result_buf)
                 .arg(&prefix_dev)
                 .arg(&self.prefix_count)
-                .arg(&base_nonce)
+                .arg(&self.key0)
+                .arg(&self.key1)
+                .arg(&base_counter)
                 .arg(&ITERS_PER_THREAD)
                 .launch(cfg)
         }
@@ -208,6 +225,8 @@ impl crate::search::GpuSearcher for CudaSearcher {
         &mut self,
         base_nonce: u64,
     ) -> Result<crate::search::GpuBatchResult, Box<dyn std::error::Error + Send + Sync>> {
+        // The trait still calls this `base_nonce`; for the CUDA backend it's
+        // the Philox counter offset.
         let result = self.search_batch(base_nonce)?;
         Ok(crate::search::GpuBatchResult {
             keys_checked: result.keys_checked,
@@ -220,10 +239,12 @@ impl crate::search::GpuSearcher for CudaSearcher {
     }
 }
 
-/// Run GPU vs CPU verification on a set of test seeds.
-/// Returns Ok(()) if all keys match, Err with details on mismatch.
+/// Run GPU vs CPU verification: launch the verify kernel with a fixed Philox key,
+/// then reproduce the same Philox -> clamp -> scalarmult flow on the host and
+/// compare. Validates both the device Philox impl and device Ed25519 math.
 pub fn verify_gpu_keygen() -> Result<(), CudaError> {
-    use crate::keygen::generate_keypair;
+    use crate::keygen::generate_keypair_from_random_bytes;
+    use crate::philox::philox_block32;
 
     let (module, stream) = compile_kernel()?;
 
@@ -231,22 +252,11 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
         .load_function("verify_keygen")
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
-    // Generate test seeds
+    // Fixed key so the test is deterministic across runs.
+    let key0: u64 = 0x0123456789abcdef;
+    let key1: u64 = 0xfedcba9876543210;
     let count: u32 = 64;
-    let mut seeds_flat = vec![0u8; count as usize * 32];
-    for i in 0..count as usize {
-        // Each seed: first 4 bytes = index, rest varies
-        seeds_flat[i * 32] = i as u8;
-        seeds_flat[i * 32 + 1] = (i >> 8) as u8;
-        seeds_flat[i * 32 + 4] = 0xDE;
-        seeds_flat[i * 32 + 5] = 0xAD;
-        seeds_flat[i * 32 + 31] = 0x42;
-    }
 
-    // Upload seeds
-    let seeds_dev = stream
-        .clone_htod(&seeds_flat)
-        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
     let mut pubkeys_dev = stream
         .alloc_zeros::<u8>(count as usize * 32)
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
@@ -263,7 +273,8 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
     unsafe {
         stream
             .launch_builder(&verify_func)
-            .arg(&seeds_dev)
+            .arg(&key0)
+            .arg(&key1)
             .arg(&mut pubkeys_dev)
             .arg(&mut privkeys_dev)
             .arg(&count)
@@ -282,14 +293,12 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
         .clone_dtoh(&privkeys_dev)
         .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
-    // Cross-check against CPU
     let mut pass = 0;
     let mut fail = 0;
     for i in 0..count as usize {
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&seeds_flat[i * 32..(i + 1) * 32]);
-
-        let cpu_kp = generate_keypair(&seed);
+        let scalar_src = philox_block32(key0, key1, i as u64, 0);
+        let prefix = philox_block32(key0, key1, i as u64, 1);
+        let cpu_kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
 
         let gpu_pub = &gpu_pubkeys[i * 32..(i + 1) * 32];
         let gpu_priv = &gpu_privkeys[i * 64..(i + 1) * 64];
@@ -301,7 +310,7 @@ pub fn verify_gpu_keygen() -> Result<(), CudaError> {
             pass += 1;
         } else {
             fail += 1;
-            eprintln!("MISMATCH seed #{}", i);
+            eprintln!("MISMATCH idx #{}", i);
             eprintln!("  CPU pubkey:  {}", hex::encode_upper(&cpu_kp.public_key));
             eprintln!("  GPU pubkey:  {}", hex::encode_upper(gpu_pub));
             eprintln!("  CPU privkey: {}", hex::encode_upper(&cpu_kp.private_key));
