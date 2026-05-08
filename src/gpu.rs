@@ -12,7 +12,7 @@ use crate::types::MeshCoreKeypair;
 
 const KERNEL_SRC: &str = include_str!("../cuda/vanity_kernel.cu");
 const BLOCK_SIZE: u32 = 256;
-const ITERS_PER_THREAD: u64 = 64;
+const ITERS_PER_THREAD: u64 = 256;
 
 /// Apply Ed25519 scalar clamp in place: zero low 3 bits of byte 0, zero
 /// bit 7 of byte 31, set bit 6 of byte 31.
