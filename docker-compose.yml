@@ -7,7 +7,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/data
+      - ./data:/data:z
     environment:
       - TZ=UTC
       - APP_BIND=0.0.0.0:8080
