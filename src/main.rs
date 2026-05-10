@@ -1,10 +1,17 @@
-mod keygen;
+mod checkpoint;
+mod cpu;
+mod deterministic;
 #[cfg(feature = "cuda")]
 mod gpu;
+mod keygen;
 #[cfg(feature = "metal")]
 mod metal_gpu;
 mod search;
 mod types;
+#[cfg(feature = "server")]
+mod server {
+    pub use mc_keygen::server::*;
+}
 
 use std::io::{self, stdout};
 use std::time::Duration;
@@ -23,10 +30,14 @@ use ratatui::{
 use search::SearchHandle;
 
 #[derive(Parser)]
-#[command(name = "mc-keygen", version, about = "MeshCore vanity Ed25519 key generator")]
+#[command(
+    name = "mc-keygen",
+    version,
+    about = "MeshCore vanity Ed25519 key generator"
+)]
 struct Cli {
-    /// Hex prefix(es) to search for (1-8 chars, 0-9/A-F each)
-    #[arg(required = true)]
+    /// Hex prefix(es) to search for (1-64 chars, 0-9/A-F each). Required unless --serve.
+    #[arg()]
     prefix: Vec<String>,
 
     /// Number of worker threads (default: all cores)
@@ -51,20 +62,94 @@ struct Cli {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     #[arg(long)]
     verify: bool,
+
+    /// Use deterministic seed+counter mode instead of random seeds
+    #[arg(long)]
+    deterministic: bool,
+
+    /// Master seed for deterministic mode (64 hex chars). Random if not provided.
+    #[arg(long, requires = "deterministic")]
+    master_seed: Option<String>,
+
+    /// Path to checkpoint file for save/resume
+    #[arg(long, requires = "deterministic")]
+    checkpoint: Option<String>,
+
+    /// Seconds between checkpoint saves (default: 10)
+    #[arg(long, default_value = "10", requires = "deterministic")]
+    checkpoint_interval: u64,
+
+    /// Resume from a checkpoint file
+    #[arg(long, requires = "deterministic")]
+    resume: Option<String>,
+
+    /// Emit JSON progress lines to stdout
+    #[arg(long)]
+    json_progress: bool,
+
+    /// Starting counter for deterministic mode
+    #[arg(long, requires = "deterministic")]
+    start_counter: Option<u64>,
+
+    /// Worker ID for multi-worker setups (default: 0)
+    #[arg(long, requires = "deterministic")]
+    worker_id: Option<u64>,
+
+    /// Total workers for chunk allocation (default: 1)
+    #[arg(long, requires = "deterministic")]
+    workers: Option<u64>,
+
+    /// Maximum attempts before stopping
+    #[arg(long)]
+    max_attempts: Option<u64>,
+
+    /// Maximum runtime in seconds
+    #[arg(long)]
+    max_runtime: Option<u64>,
+
+    /// Start web server (requires 'server' feature)
+    #[cfg(feature = "server")]
+    #[arg(long)]
+    serve: bool,
+
+    /// Run a benchmark (random prefix, default 6 chars)
+    #[arg(long)]
+    benchmark: bool,
+
+    /// Prefix length for benchmark (default: 6)
+    #[arg(long, default_value = "6")]
+    benchmark_prefix_length: u32,
+
+    /// Benchmark timeout in seconds (0 = no timeout)
+    #[arg(long, default_value = "0")]
+    benchmark_timeout: u64,
 }
 
 fn validate_prefix(prefix: &str) -> Result<String, String> {
     let upper = prefix.to_ascii_uppercase();
 
-    if upper.is_empty() || upper.len() > 8 {
+    if upper.is_empty() || upper.len() > 64 {
         return Err(format!(
-            "prefix must be 1-8 hex characters, got {} characters",
+            "prefix must be 1-64 hex characters, got {} characters",
             upper.len()
         ));
     }
 
+    if upper.len() > 8 {
+        let expected_f64 = 16_f64.powf(upper.len() as f64);
+        eprintln!(
+            "Warning: prefix length {} is computationally expensive. \
+             Expected ~{:.2e} attempts on average.",
+            upper.len(),
+            expected_f64,
+        );
+    }
+
     if !upper.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err(format!("prefix must be valid hex (0-9, A-F), got '{}'", prefix));
+        return Err(format!(
+            "prefix must be valid hex (0-9, A-F), got '{}'",
+            prefix
+        ));
     }
 
     // Reject prefixes that would always start with 00 or FF
@@ -156,7 +241,7 @@ fn run_tui_loop(
                     Constraint::Length(1), // speed
                     Constraint::Length(1), // elapsed
                     Constraint::Length(1), // est remaining
-                    Constraint::Min(0),   // spacer
+                    Constraint::Min(0),    // spacer
                 ])
                 .split(inner);
 
@@ -165,7 +250,9 @@ fn run_tui_loop(
                 Span::styled(&*prefix_label_owned, Style::default().fg(Color::Gray)),
                 Span::styled(
                     &*prefix_display_owned,
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("  ({})", mode_label_owned),
@@ -203,7 +290,9 @@ fn run_tui_loop(
                 Span::styled("Keys checked:   ", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format_number(stats.attempts),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
             frame.render_widget(Paragraph::new(keys_line), chunks[4]);
@@ -212,7 +301,9 @@ fn run_tui_loop(
                 Span::styled("Speed:          ", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format!("{} keys/sec", format_number(stats.keys_per_sec as u64)),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]);
             frame.render_widget(Paragraph::new(speed_line), chunks[5]);
@@ -295,38 +386,17 @@ fn print_colored_result(result: &types::SearchResult) {
     let prefix_len = result.matched_prefix.len();
     let pk_prefix = &result.public_key[..prefix_len];
     let pk_rest = &result.public_key[prefix_len..];
-    eprint!(
-        "{}",
-        style::style("Public Key:  ").dim()
-    );
-    eprint!(
-        "{}",
-        style::style(pk_prefix).green().bold()
-    );
-    eprintln!(
-        "{}",
-        style::style(pk_rest).white()
-    );
+    eprint!("{}", style::style("Public Key:  ").dim());
+    eprint!("{}", style::style(pk_prefix).green().bold());
+    eprintln!("{}", style::style(pk_rest).white());
 
     // Private key
-    eprint!(
-        "{}",
-        style::style("Private Key: ").dim()
-    );
-    eprintln!(
-        "{}",
-        style::style(&result.private_key).white()
-    );
+    eprint!("{}", style::style("Private Key: ").dim());
+    eprintln!("{}", style::style(&result.private_key).white());
 
     if let Some(seed) = &result.seed {
-        eprint!(
-            "{}",
-            style::style("Seed:        ").dim()
-        );
-        eprintln!(
-            "{}",
-            style::style(seed).white()
-        );
+        eprint!("{}", style::style("Seed:        ").dim());
+        eprintln!("{}", style::style(seed).white());
     }
 }
 
@@ -374,15 +444,137 @@ fn gpu_names_label(searchers: &[Box<dyn search::GpuSearcher>]) -> String {
         .join(", ")
 }
 
+fn run_benchmark(prefix_length: u32, timeout_secs: u64) {
+    use rand::Rng;
+
+    eprintln!("=== Benchmark ===");
+    eprintln!("Prefix length: {} chars", prefix_length);
+
+    // Generate random hex prefix
+    let hex_chars: &[u8] = b"0123456789ABCDEF";
+    let mut rng = rand::thread_rng();
+    let prefix: String = (0..prefix_length)
+        .map(|_| hex_chars[rng.gen_range(0..16)] as char)
+        .collect();
+    eprintln!("Target prefix: {}", prefix);
+
+    let prefixes = vec![prefix.clone()];
+    let state = deterministic::DeterministicState::new();
+    let cpu_config = cpu::CpuConfig::detect();
+    let num_threads = cpu_config.available_workers().max(1);
+
+    let start = std::time::Instant::now();
+    let handle = SearchHandle::start_deterministic(&prefixes, state, num_threads, None, 10, false);
+
+    let backend = "cpu";
+    let device = "none";
+
+    // Poll until found or timeout
+    loop {
+        if handle.is_done() {
+            break;
+        }
+        if timeout_secs > 0 && start.elapsed().as_secs() >= timeout_secs {
+            eprintln!("Timeout reached ({timeout_secs}s)");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let stats = handle.stats(0);
+        eprint!(
+            "\r  Attempts: {}  Keys/s: {}  Elapsed: {:.1}s",
+            format_number(stats.attempts),
+            format_number(stats.keys_per_sec as u64),
+            stats.elapsed_secs,
+        );
+    }
+    eprintln!();
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let attempts = handle.stats(0).attempts;
+    let kps = if elapsed > 0.0 {
+        attempts as f64 / elapsed
+    } else {
+        0.0
+    };
+
+    let found = handle.is_done();
+    let result = handle.finish();
+
+    eprintln!();
+    if found {
+        eprintln!("✓ Found match!");
+        if let Ok(ref r) = result {
+            eprintln!("  Public key: {}", r.public_key);
+        }
+    } else {
+        eprintln!("✗ Did not find match (timeout)");
+    }
+    eprintln!("  Attempts:      {}", format_number(attempts));
+    eprintln!("  Elapsed:       {:.2}s", elapsed);
+    eprintln!("  Keys/sec:      {}", format_number(kps as u64));
+    eprintln!("  Backend:       {}", backend);
+    eprintln!(
+        "  CPU workers:   {} ({} reserved)",
+        num_threads, cpu_config.reserved_cores
+    );
+    eprintln!("  Total cores:   {}", cpu_config.total_logical_cores);
+
+    // Output JSON result
+    let benchmark_result = serde_json::json!({
+        "type": "benchmark_result",
+        "target_prefix": prefix,
+        "prefix_length": prefix_length,
+        "attempts": attempts,
+        "runtime_seconds": elapsed,
+        "average_keys_per_second": kps,
+        "found": found,
+        "backend": backend,
+        "device": device,
+        "cpu_total_cores": cpu_config.total_logical_cores,
+        "cpu_reserved_cores": cpu_config.reserved_cores,
+        "cpu_worker_threads": num_threads,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&benchmark_result).unwrap()
+    );
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    // --serve mode: start the web server
+    #[cfg(feature = "server")]
+    if cli.serve {
+        let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "/data/app.db".to_string());
+        let bind = std::env::var("APP_BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        rt.block_on(async {
+            if let Err(e) = server::run(&bind, &db_path).await {
+                eprintln!("Server error: {}", e);
+                std::process::exit(1);
+            }
+        });
+        return;
+    }
+
+    // --benchmark mode
+    if cli.benchmark {
+        run_benchmark(cli.benchmark_prefix_length, cli.benchmark_timeout);
+        return;
+    }
+
+    if cli.prefix.is_empty() {
+        eprintln!("Error: at least one PREFIX is required (or use --serve)");
+        std::process::exit(1);
+    }
 
     let mut prefixes = Vec::new();
     for raw in &cli.prefix {
         match validate_prefix(raw) {
             Ok(p) => prefixes.push(p),
             Err(e) => {
-                if cli.json {
+                if cli.json || cli.json_progress {
                     eprintln!("Error: {}", e);
                 } else {
                     print_colored_error(&e);
@@ -392,16 +584,19 @@ fn main() {
         }
     }
 
-    let num_threads = cli.threads.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    });
+    // CPU config with reservation
+    let cpu_config = cpu::CpuConfig::detect();
+    let num_threads = cli
+        .threads
+        .unwrap_or_else(|| cpu_config.available_workers().max(1));
 
     // Expected attempts: use shortest prefix length, divided by count of same-length prefixes
     let min_len = prefixes.iter().map(|p| p.len()).min().unwrap();
     let same_len_count = prefixes.iter().filter(|p| p.len() == min_len).count() as u64;
-    let expected = 16u64.pow(min_len as u32) / same_len_count;
+    let expected = match 16u64.checked_pow(min_len as u32) {
+        Some(v) => v / same_len_count.max(1),
+        None => u64::MAX, // overflow for very long prefixes; use max as placeholder
+    };
 
     let prefix_count_label = if prefixes.len() == 1 {
         String::new()
@@ -438,6 +633,101 @@ fn main() {
         }
     }
 
+    // --- Deterministic mode ---
+    if cli.deterministic {
+        let mut state = if let Some(ref checkpoint_path) = cli.resume {
+            let path = std::path::PathBuf::from(checkpoint_path);
+            match checkpoint::Checkpoint::load(&path) {
+                Ok(ckpt) => {
+                    eprintln!("Loaded checkpoint from {}", checkpoint_path);
+                    ckpt.to_deterministic_state().unwrap_or_else(|e| {
+                        eprintln!("Warning: failed to restore state: {}", e);
+                        deterministic::DeterministicState::new()
+                    })
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load checkpoint ({}), starting fresh", e);
+                    deterministic::DeterministicState::new()
+                }
+            }
+        } else if let Some(ref hex) = cli.master_seed {
+            deterministic::DeterministicState::from_hex_seed(hex).unwrap_or_else(|e| {
+                eprintln!("Error: invalid master seed: {}", e);
+                std::process::exit(1);
+            })
+        } else {
+            eprintln!("Generating random master seed...");
+            deterministic::DeterministicState::new()
+        };
+
+        if let Some(counter) = cli.start_counter {
+            state.set_counter(counter);
+        }
+        if let Some(wid) = cli.worker_id {
+            state.worker_id = wid;
+        }
+
+        let checkpoint_path = cli.checkpoint.as_ref().map(std::path::PathBuf::from);
+        let handle = SearchHandle::start_deterministic(
+            &prefixes,
+            state,
+            num_threads,
+            checkpoint_path,
+            cli.checkpoint_interval,
+            cli.json_progress,
+        );
+
+        let mode_label = format!(
+            "deterministic, {} threads{}",
+            num_threads, prefix_count_label
+        );
+
+        if cli.json_progress {
+            // JSON progress mode: emit progress lines until done, then result
+            while !handle.is_done() {
+                if let Some(line) = handle.json_progress("cpu", "none") {
+                    println!("{}", line);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if let Some(line) = handle.json_result() {
+                println!("{}", line);
+            }
+            match handle.finish() {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else if cli.json {
+            match handle.finish() {
+                Ok(result) => println!("{}", serde_json::to_string_pretty(&result).unwrap()),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            let search_result = match run_tui_loop(handle, &prefixes, expected, &mode_label) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("TUI error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            match search_result {
+                Ok(result) => print_colored_result(&result),
+                Err(e) => {
+                    print_colored_error(&format!("{}", e));
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
+
+    // --- Non-deterministic mode (original behavior) ---
     let gpu_searchers = if cpu_only {
         vec![]
     } else {
@@ -461,7 +751,10 @@ fn main() {
         (SearchHandle::start(&prefixes, num_threads), label)
     } else {
         let gpu_label = gpu_names_label(&gpu_searchers);
-        let label = format!("{} + {} threads{}", gpu_label, num_threads, prefix_count_label);
+        let label = format!(
+            "{} + {} threads{}",
+            gpu_label, num_threads, prefix_count_label
+        );
         (
             SearchHandle::start_hybrid(&prefixes, num_threads, gpu_searchers),
             label,
@@ -491,5 +784,70 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn valid_short_prefix() {
+        assert!(validate_prefix("AB").is_ok());
+        assert!(validate_prefix("C0DE").is_ok());
+        assert!(validate_prefix("1A2B3C4D").is_ok());
+    }
+
+    #[test]
+    fn valid_long_prefix() {
+        // 9 chars (e.g. C0DEBA5ED)
+        assert!(validate_prefix("C0DEBA5ED").is_ok());
+        // 16 chars
+        assert!(validate_prefix("C0DEBA5EDC0DEBA5E").is_ok());
+        // 64 chars
+        assert!(validate_prefix(&"A".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn rejects_too_long_prefix() {
+        assert!(validate_prefix(&"A".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_prefix() {
+        assert!(validate_prefix("").is_err());
+    }
+
+    #[test]
+    fn rejects_non_hex_prefix() {
+        assert!(validate_prefix("GH").is_err());
+        assert!(validate_prefix("ZZZZ").is_err());
+        assert!(validate_prefix("0xBE").is_err());
+    }
+
+    #[test]
+    fn rejects_00_prefix() {
+        assert!(validate_prefix("00").is_err());
+        assert!(validate_prefix("00AB").is_err());
+    }
+
+    #[test]
+    fn rejects_ff_prefix() {
+        assert!(validate_prefix("FF").is_err());
+        assert!(validate_prefix("FFAB").is_err());
+    }
+
+    #[test]
+    fn case_insensitive_accept() {
+        assert!(validate_prefix("ab").is_ok());
+        assert!(validate_prefix("deadbeef").is_ok());
+        assert!(validate_prefix("C0deBa5ed").is_ok());
+    }
+
+    #[test]
+    fn single_char_prefix_ok() {
+        assert!(validate_prefix("A").is_ok());
+        assert!(validate_prefix("0").is_ok());
+        assert!(validate_prefix("F").is_ok());
     }
 }

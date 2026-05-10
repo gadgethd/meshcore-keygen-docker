@@ -1,74 +1,212 @@
 # mc-keygen
 
-Vanity Ed25519 key generator for [MeshCore](https://github.com/ripplebiz/MeshCore). Find keys whose public key starts with a chosen hex prefix.
+Vanity Ed25519 key generator for [MeshCore](https://github.com/ripplebiz/MeshCore) with a web UI, job queue, deterministic pause/resume, benchmarking, and GPU support.
 
-## Usage
+## Quick start (Docker)
+
+```bash
+docker compose up --build
+# Open http://localhost:8080
+```
+
+Requires Docker with NVIDIA Container Toolkit for GPU support.
+
+## Features
+
+- **Web UI** — Dashboard, New Job with live estimates, Queue, Results, Settings
+- **CPU + CUDA GPU** — Hybrid search across CPU threads and NVIDIA GPUs
+- **Deterministic pause/resume** — master seed + counter, atomic checkpoint files
+- **Live estimates** — Type a hex prefix and see expected time to 50/90/95/99% milestones
+- **Benchmark mode** — Measure real keys/sec for accurate estimates
+- **Job queue** — Create, pause, resume, duplicate, reorder jobs
+- **CPU reservation** — Reserve cores for the web UI (default: 1 core)
+- **SQLite persistence** — Jobs, results, benchmarks, settings survive restarts
+- **REST API** — Full API for external automation
+- **WebSocket** — Live status updates at `/api/ws`
+
+## CLI Usage
 
 ```
 mc-keygen <PREFIX>... [OPTIONS]
 ```
 
 **Options:**
-- `-t, --threads <N>` — worker threads (default: all cores)
-- `--json` — output result as JSON (no TUI, no color)
-- `--cpu-only` — force CPU-only search, skip GPU even if available (requires `cuda` or `metal` feature)
-- `--gpu-only` — force GPU-only search, no CPU threads (requires `cuda` or `metal` feature)
-- `--verify` — cross-check GPU keygen against CPU (requires `cuda` or `metal` feature)
 
-When built with GPU support (`cuda` or `metal` feature), the default mode is **hybrid**: both CPU threads and GPU run concurrently, and the first match from either wins. If no GPU is detected at runtime, the tool falls back to CPU-only with a warning.
+| Flag | Description |
+|------|-------------|
+| `-t, --threads <N>` | Worker threads (default: all cores minus reserved) |
+| `--json` | Output result as JSON (no TUI) |
+| `--json-progress` | Emit JSON progress lines to stdout |
+| `--deterministic` | Use deterministic seed+counter mode |
+| `--master-seed <HEX>` | Master seed for deterministic mode (64 hex chars) |
+| `--checkpoint <PATH>` | Checkpoint file for save/resume |
+| `--checkpoint-interval <N>` | Seconds between checkpoint saves (default: 10) |
+| `--resume <PATH>` | Resume from a checkpoint file |
+| `--start-counter <N>` | Starting counter for deterministic mode |
+| `--worker-id <N>` | Worker ID for multi-worker setups |
+| `--workers <N>` | Total workers for chunk allocation |
+| `--max-attempts <N>` | Stop after N attempts |
+| `--max-runtime <N>` | Stop after N seconds |
+| `--benchmark` | Run a benchmark with random prefix |
+| `--benchmark-prefix-length <N>` | Benchmark prefix length (default: 6) |
+| `--benchmark-timeout <N>` | Benchmark timeout in seconds |
+| `--serve` | Start web server (requires `server` feature) |
+
+**GPU flags (with `cuda` feature):**
+
+| Flag | Description |
+|------|-------------|
+| `--cpu-only` | Force CPU-only search |
+| `--gpu-only` | Force GPU-only search |
+| `--verify` | Verify GPU keygen against CPU |
+| `--device <N>` | Select GPU device |
 
 **Examples:**
+
 ```bash
-mc-keygen AB             # find a key starting with AB (hybrid if GPU available)
-mc-keygen AB CD EF       # find a key matching ANY of these prefixes
-mc-keygen DEAD -t 4      # use 4 threads
-mc-keygen AB --json      # machine-readable output
-mc-keygen ABCDEF --gpu-only   # GPU only for longer prefixes
-mc-keygen AB --cpu-only       # force CPU even when GPU is available
+mc-keygen AB                      # find key starting with AB
+mc-keygen C0DEBA5ED               # 9-char prefix (with warning)
+mc-keygen AB CD EF --json         # multi-prefix, JSON output
+mc-keygen AB --deterministic --checkpoint /data/checkpoints/job.json
+mc-keygen --benchmark --benchmark-prefix-length 6
+mc-keygen --serve                 # start web server at :8080
 ```
 
-Multiple prefixes can be passed in a single invocation — every key is checked against all of them, so searching for N prefixes is ~N× more efficient than N separate runs. The JSON output includes a `matched_prefix` field.
+## Web UI Pages
 
-### Search difficulty
+### Dashboard
+Live overview: active job, keys/s, attempts, queue length, results count, GPU status, CPU allocation, last benchmark.
 
-Each hex character multiplies expected attempts by 16:
+### New Job
+Type hex prefix(es) to see live time estimates using benchmark data. Create jobs with CPU/GPU backend selection, max attempts/runtime, and notes.
 
-| Prefix | Expected attempts | CPU time¹ | GPU time¹ |
-|--------|-------------------|-----------|-----------|
-| 1 char | 16                | instant   | instant   |
-| 2 char | 256               | instant   | instant   |
-| 3 char | 4,096             | instant   | instant   |
-| 4 char | 65,536            | instant   | instant   |
-| 5 char | ~1M               | <1s       | instant   |
-| 6 char | ~16M              | ~12s      | <1s       |
-| 7 char | ~268M             | ~3.5m     | ~4s       |
-| 8 char | ~4.3B             | ~55m      | ~63s      |
+### Queue
+View all jobs with status, progress, and controls: start, pause, resume, stop, duplicate, delete.
 
-¹ CPU: Ryzen 9 7950X3D, 32 threads (~1.3M keys/s). GPU: RTX 4090 (~68M keys/s). See [docs/gpu.md](docs/gpu.md) for details.
+### Results
+Found keys with public addresses. Private keys hidden by default with reveal/copy option.
+
+### Settings
+Configure CPU reservation, worker threads, checkpoint interval, default backend, timezone, and secret display policy.
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/status` | System status |
+| GET | `/api/jobs` | List all jobs |
+| POST | `/api/jobs` | Create job |
+| GET | `/api/jobs/:id` | Get job |
+| PATCH | `/api/jobs/:id` | Update job |
+| DELETE | `/api/jobs/:id` | Delete job |
+| POST | `/api/jobs/:id/pause` | Pause job |
+| POST | `/api/jobs/:id/resume` | Resume job |
+| POST | `/api/jobs/:id/stop` | Stop job |
+| POST | `/api/jobs/:id/restart` | Restart (new seed) |
+| POST | `/api/jobs/:id/duplicate` | Duplicate job |
+| GET | `/api/results` | List results |
+| DELETE | `/api/results/:id` | Delete result |
+| GET | `/api/benchmarks` | List benchmarks |
+| POST | `/api/benchmarks` | Create benchmark |
+| DELETE | `/api/benchmarks/:id` | Delete benchmark |
+| POST | `/api/benchmarks/:id/set-default` | Set as default estimate benchmark |
+| GET | `/api/settings` | Get settings |
+| PATCH | `/api/settings` | Update settings |
+| POST | `/api/estimate` | Get time estimate for prefixes |
+| GET | `/api/system/cpu` | CPU info |
+| GET | `/api/devices` | Available backends |
+| GET | `/api/ws` | WebSocket live updates |
+
+## Deterministic model
+
+```
+candidate_seed = SHA-256(master_seed || worker_id || counter)
+```
+
+- **Pause** = save checkpoint, stop workers
+- **Resume** = load checkpoint, continue same master seed + counter
+- **Restart** = new random master seed
+- **Duplicate** = copy settings, new random master seed
 
 ## Building
 
 ```bash
-cargo build --release                    # CPU only
-cargo build --release --features cuda    # with NVIDIA GPU support
-cargo build --release --features metal   # with Apple Metal GPU support
+# CPU only
+cargo build --release
+
+# With CUDA GPU support
+cargo build --release --features cuda
+
+# With web server
+cargo build --release --features cuda,server
 ```
 
-CUDA support requires the NVIDIA CUDA Toolkit. Metal support requires macOS with an Apple Silicon or AMD GPU. See [docs/gpu.md](docs/gpu.md) for details.
+## Docker Compose
 
-## How it works
+```yaml
+services:
+  meshcore-keygen-ui:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=UTC
+      - APP_BIND=0.0.0.0:8080
+      - RESERVED_CPU_CORES=1
+      - MAX_CPU_WORKERS=
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+```
 
-1. Generate random 32-byte seed
-2. SHA-512 hash, clamp scalar (per Ed25519 spec), derive public key
-3. Check if public key hex starts with the target prefix
-4. Repeat across all cores (or GPU threads) until a match is found
+## Environment variables
 
-Keys starting with `00` or `FF` are skipped (reserved by MeshCore).
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_BIND` | `0.0.0.0:8080` | Server listen address |
+| `DATABASE_PATH` | `/data/app.db` | SQLite database path |
+| `TZ` | `UTC` | Timezone for schedules |
+| `RESERVED_CPU_CORES` | `1` | Cores reserved for UI/container |
+| `MAX_CPU_WORKERS` | (auto) | Max CPU worker threads |
+
+## Development
+
+```bash
+# Run tests
+docker compose -f docker-compose.dev.yml run --rm dev cargo test
+
+# Or inside the dev container
+docker run --rm -v $PWD:/build -w /build meshcore-keygen-dev-builder cargo test --features server
+
+# Format
+cargo fmt
+
+# Lint
+cargo clippy --no-deps
+```
+
+## Security
+
+- Private keys and seeds are hidden by default in the UI and logs
+- Use `APP_PASSWORD` env var for basic auth (future)
+- Do not expose the web UI to the public internet without a reverse proxy
+- Back up `/data` to preserve jobs, results, and settings
+
+## License
+
+MIT OR Apache-2.0
 
 ## Sources
 
-- [MeshCore](https://github.com/ripplebiz/MeshCore) — the mesh networking firmware these keys are for
-- [MeshCore mc-keygen web tool](https://gessaman.com/mc-keygen/) — reference implementation of the key generation algorithm
-- [Ed25519 / RFC 8032](https://datatracker.ietf.org/doc/html/rfc8032) — the signature scheme spec
-- [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek) — Rust Ed25519 elliptic curve library
-- [ratatui](https://github.com/ratatui/ratatui) — TUI framework for the progress display
+- [MeshCore](https://github.com/ripplebiz/MeshCore)
+- [MeshCore mc-keygen web tool](https://gessaman.com/mc-keygen/)
+- [Ed25519 / RFC 8032](https://datatracker.ietf.org/doc/html/rfc8032)
+- [curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek)
+- [ratatui](https://github.com/ratatui/ratatui)

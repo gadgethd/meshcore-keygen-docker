@@ -1,15 +1,18 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rand::rngs::OsRng;
 use rand::RngCore;
 
+use crate::checkpoint::Checkpoint;
+use crate::deterministic::DeterministicState;
 use crate::keygen::generate_keypair;
 use crate::types::{MeshCoreKeypair, SearchError, SearchResult, SearchStats};
 
 const BATCH_SIZE: u64 = 1024;
+const CHUNK_SIZE: u64 = 1_000_000_000;
 
 /// Result from a single GPU batch dispatch.
 pub struct GpuBatchResult {
@@ -107,6 +110,8 @@ struct MatchResult {
     keypair: MeshCoreKeypair,
     matched_prefix: String,
     seed: Option<String>,
+    master_seed: Option<String>,
+    counter: Option<u64>,
 }
 /// Handle for a running vanity key search.
 /// Exposes atomics so a TUI render loop can poll progress directly.
@@ -116,6 +121,9 @@ pub struct SearchHandle {
     result: Arc<Mutex<Option<MatchResult>>>,
     start: Instant,
     workers: Vec<JoinHandle<()>>,
+    checkpoint_path: Option<std::path::PathBuf>,
+    checkpoint_interval: Duration,
+    deterministic_state: Arc<Mutex<Option<DeterministicState>>>,
 }
 
 impl SearchHandle {
@@ -142,12 +150,12 @@ impl SearchHandle {
                 let mut seed = [0u8; 32];
                 let mut local_count: u64 = 0;
 
-                while !found.load(Ordering::Relaxed) {
+                while !found.load(Ordering::Acquire) {
                     OsRng.fill_bytes(&mut seed);
                     let kp = generate_keypair(&seed);
                     local_count += 1;
 
-                    if local_count % BATCH_SIZE == 0 {
+                    if local_count.is_multiple_of(BATCH_SIZE) {
                         total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
                     }
 
@@ -158,11 +166,13 @@ impl SearchHandle {
                     if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
                     {
                         total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                        found.store(true, Ordering::Relaxed);
+                        found.store(true, Ordering::Release);
                         *result.lock().unwrap() = Some(MatchResult {
                             keypair: kp,
                             matched_prefix: matched.0.clone(),
                             seed: Some(hex::encode(seed).to_uppercase()),
+                            master_seed: None,
+                            counter: None,
                         });
                         return;
                     }
@@ -178,12 +188,15 @@ impl SearchHandle {
             result,
             start: Instant::now(),
             workers,
+            checkpoint_path: None,
+            checkpoint_interval: Duration::from_secs(10),
+            deterministic_state: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Check if a match has been found.
     pub fn is_done(&self) -> bool {
-        self.found.load(Ordering::Relaxed)
+        self.found.load(Ordering::Acquire)
     }
 
     /// Get current search statistics.
@@ -220,6 +233,11 @@ impl SearchHandle {
                 attempts,
                 elapsed_secs: elapsed,
                 seed: m.seed,
+                master_seed: m.master_seed,
+                counter: m.counter,
+                backend: None,
+                device: None,
+                job_id: None,
             }),
             None => Err(SearchError {
                 attempts,
@@ -228,11 +246,180 @@ impl SearchHandle {
         }
     }
 
-    /// Start a GPU-only vanity key search. Spawns one thread per GPU device.
-    pub fn start_gpu(
+    /// Start a deterministic vanity key search using master_seed + counter.
+    /// Supports checkpointing and JSON progress output.
+    pub fn start_deterministic(
         prefixes: &[String],
-        gpu_searchers: Vec<Box<dyn GpuSearcher>>,
+        mut state: DeterministicState,
+        num_threads: usize,
+        checkpoint_path: Option<std::path::PathBuf>,
+        checkpoint_interval_secs: u64,
+        _json_progress: bool,
     ) -> Self {
+        let matchers: Arc<Vec<(String, PrefixMatcher)>> = Arc::new(
+            prefixes
+                .iter()
+                .map(|p| (p.clone(), PrefixMatcher::new(p)))
+                .collect(),
+        );
+        let found = Arc::new(AtomicBool::new(false));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
+        let state_arc = Arc::new(Mutex::new(Some(state.clone())));
+        let master_seed_hex = state.master_seed_hex();
+
+        let mut workers = Vec::with_capacity(num_threads);
+        for worker_id in 0..num_threads {
+            let matchers = Arc::clone(&matchers);
+            let found = Arc::clone(&found);
+            let total_attempts = Arc::clone(&attempts);
+            let result = Arc::clone(&result);
+            let state_arc = Arc::clone(&state_arc);
+
+            // Each worker gets a chunk of counters to avoid overlap
+            let worker_state = {
+                let mut s = state.clone();
+                s.worker_id = worker_id as u64;
+                s.counter = worker_id as u64 * CHUNK_SIZE;
+                s
+            };
+
+            workers.push(thread::spawn({
+                let master_hex = master_seed_hex.clone();
+                move || {
+                    let mut local_state = worker_state;
+                    let mut local_count: u64 = 0;
+
+                    while !found.load(Ordering::Acquire) {
+                        let seed = local_state.next_seed();
+                        let kp = generate_keypair(&seed);
+                        local_count += 1;
+
+                        if local_count.is_multiple_of(BATCH_SIZE) {
+                            total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
+                        }
+
+                        if should_skip(&kp.public_key) {
+                            continue;
+                        }
+
+                        if let Some(matched) =
+                            matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
+                        {
+                            total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+                            found.store(true, Ordering::Release);
+                            *result.lock().unwrap() = Some(MatchResult {
+                                keypair: kp,
+                                matched_prefix: matched.0.clone(),
+                                seed: Some(hex::encode_upper(seed)),
+                                master_seed: Some(master_hex),
+                                counter: Some(local_state.counter - 1),
+                            });
+                            if let Ok(mut s) = state_arc.lock() {
+                                if let Some(ref mut shared) = *s {
+                                    shared.counter = local_state.counter;
+                                }
+                            }
+                            return;
+                        }
+                    }
+
+                    total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+                    if let Ok(mut s) = state_arc.lock() {
+                        if let Some(ref mut shared) = *s {
+                            if local_state.counter > shared.counter {
+                                shared.counter = local_state.counter;
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+
+        SearchHandle {
+            found,
+            attempts,
+            result,
+            start: Instant::now(),
+            workers,
+            checkpoint_path,
+            checkpoint_interval: Duration::from_secs(checkpoint_interval_secs),
+            deterministic_state: state_arc,
+        }
+    }
+
+    /// Get current deterministic state (for checkpoint saves).
+    pub fn get_deterministic_state(&self) -> Option<DeterministicState> {
+        self.deterministic_state.lock().ok()?.clone()
+    }
+
+    /// Save a checkpoint of the current search state.
+    pub fn save_checkpoint(
+        &self,
+        job_id: &str,
+        prefixes: &[String],
+        backend: &str,
+        device: &str,
+        cpu_worker_threads: usize,
+        cpu_reserved_cores: usize,
+    ) -> Result<(), String> {
+        let path = self
+            .checkpoint_path
+            .clone()
+            .unwrap_or_else(|| Checkpoint::default_path(job_id));
+        let state = self
+            .get_deterministic_state()
+            .ok_or("no deterministic state".to_string())?;
+        let ckpt = Checkpoint::new(
+            job_id,
+            prefixes,
+            &state,
+            backend,
+            device,
+            cpu_worker_threads,
+            cpu_reserved_cores,
+        );
+        ckpt.save(&path)
+    }
+
+    /// Get JSON progress line (emitted per-batch).
+    pub fn json_progress(&self, backend: &str, device: &str) -> Option<String> {
+        let state = self.get_deterministic_state()?;
+        let stats = self.stats(0);
+        let progress = serde_json::json!({
+            "type": "progress",
+            "attempts": stats.attempts,
+            "next_counter": state.counter,
+            "keys_per_second": stats.keys_per_sec,
+            "elapsed_seconds": stats.elapsed_secs,
+            "backend": backend,
+            "device": device,
+        });
+        Some(progress.to_string())
+    }
+
+    /// JSON result output.
+    pub fn json_result(&self) -> Option<String> {
+        let m = self.result.lock().unwrap();
+        let m = m.as_ref()?;
+        let elapsed = self.start.elapsed().as_secs_f64();
+        let attempts = self.attempts.load(Ordering::Relaxed);
+        let result = serde_json::json!({
+            "type": "result",
+            "prefix": m.matched_prefix,
+            "public_key": hex::encode_upper(m.keypair.public_key),
+            "private_key": hex::encode_upper(m.keypair.private_key),
+            "candidate_seed": m.seed,
+            "master_seed": m.master_seed,
+            "counter": m.counter,
+            "attempts": attempts,
+            "elapsed_seconds": elapsed,
+        });
+        Some(result.to_string())
+    }
+
+    /// Start a GPU-only vanity key search. Spawns one thread per GPU device.
+    pub fn start_gpu(prefixes: &[String], gpu_searchers: Vec<Box<dyn GpuSearcher>>) -> Self {
         let matchers: Arc<Vec<(String, PrefixMatcher)>> = Arc::new(
             prefixes
                 .iter()
@@ -260,6 +447,9 @@ impl SearchHandle {
             result,
             start: Instant::now(),
             workers,
+            checkpoint_path: None,
+            checkpoint_interval: Duration::from_secs(10),
+            deterministic_state: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -292,12 +482,12 @@ impl SearchHandle {
                 let mut seed = [0u8; 32];
                 let mut local_count: u64 = 0;
 
-                while !found.load(Ordering::Relaxed) {
+                while !found.load(Ordering::Acquire) {
                     OsRng.fill_bytes(&mut seed);
                     let kp = generate_keypair(&seed);
                     local_count += 1;
 
-                    if local_count % BATCH_SIZE == 0 {
+                    if local_count.is_multiple_of(BATCH_SIZE) {
                         total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
                     }
 
@@ -305,15 +495,16 @@ impl SearchHandle {
                         continue;
                     }
 
-                    if let Some(matched) =
-                        matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
+                    if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
                     {
                         total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                        found.store(true, Ordering::Relaxed);
+                        found.store(true, Ordering::Release);
                         *result.lock().unwrap() = Some(MatchResult {
                             keypair: kp,
                             matched_prefix: matched.0.clone(),
                             seed: Some(hex::encode_upper(seed)),
+                            master_seed: None,
+                            counter: None,
                         });
                         return;
                     }
@@ -340,6 +531,9 @@ impl SearchHandle {
             result,
             start: Instant::now(),
             workers,
+            checkpoint_path: None,
+            checkpoint_interval: Duration::from_secs(10),
+            deterministic_state: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -372,6 +566,8 @@ fn gpu_dispatch_loop(
                         keypair: kp,
                         matched_prefix,
                         seed: None,
+                        master_seed: None,
+                        counter: None,
                     });
                     return;
                 }

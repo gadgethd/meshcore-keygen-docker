@@ -30,19 +30,11 @@ fn bench_prefix_match(c: &mut Criterion) {
 
     group.bench_function("5_prefixes_hit_last", |b| {
         let key = make_key(0x34); // matches last prefix
-        b.iter(|| {
-            prefixes_5
-                .iter()
-                .any(|(_, m)| m.matches(black_box(&key)))
-        })
+        b.iter(|| prefixes_5.iter().any(|(_, m)| m.matches(black_box(&key))))
     });
     group.bench_function("5_prefixes_miss", |b| {
         let key = make_key(0x99);
-        b.iter(|| {
-            prefixes_5
-                .iter()
-                .any(|(_, m)| m.matches(black_box(&key)))
-        })
+        b.iter(|| prefixes_5.iter().any(|(_, m)| m.matches(black_box(&key))))
     });
 
     let prefixes_10: Vec<(String, PrefixMatcher)> =
@@ -53,19 +45,11 @@ fn bench_prefix_match(c: &mut Criterion) {
 
     group.bench_function("10_prefixes_hit_last", |b| {
         let key = make_key(0xDE);
-        b.iter(|| {
-            prefixes_10
-                .iter()
-                .any(|(_, m)| m.matches(black_box(&key)))
-        })
+        b.iter(|| prefixes_10.iter().any(|(_, m)| m.matches(black_box(&key))))
     });
     group.bench_function("10_prefixes_miss", |b| {
         let key = make_key(0x99);
-        b.iter(|| {
-            prefixes_10
-                .iter()
-                .any(|(_, m)| m.matches(black_box(&key)))
-        })
+        b.iter(|| prefixes_10.iter().any(|(_, m)| m.matches(black_box(&key))))
     });
 
     // Longer prefix (4 hex chars = 2 bytes)

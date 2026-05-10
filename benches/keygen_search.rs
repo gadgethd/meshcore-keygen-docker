@@ -40,10 +40,11 @@ fn bench_keygen_pipeline(c: &mut Criterion) {
     });
 
     // Keygen + 10 prefix checks (all miss)
-    let matchers_10: Vec<PrefixMatcher> = ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "FA"]
-        .iter()
-        .map(|p| PrefixMatcher::new(p))
-        .collect();
+    let matchers_10: Vec<PrefixMatcher> =
+        ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "FA"]
+            .iter()
+            .map(|p| PrefixMatcher::new(p))
+            .collect();
     group.bench_function("keygen_10prefixes", |b| {
         b.iter(|| {
             let kp = generate_keypair(&seed);

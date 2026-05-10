@@ -49,6 +49,30 @@ impl fmt::Display for CudaError {
 
 impl std::error::Error for CudaError {}
 
+/// Try to detect a CUDA GPU. Returns (available, device_name).
+pub fn detect_cuda() -> (bool, Option<String>) {
+    match CudaContext::new(0) {
+        Ok(ctx) => {
+            let name = ctx
+                .name()
+                .unwrap_or_else(|_| "Unknown CUDA GPU".to_string());
+            (true, Some(name))
+        }
+        Err(_) => (false, None),
+    }
+}
+
+/// Initialize GPU searchers for the given prefixes. Returns Vec of searchers on success.
+pub fn try_init_gpu(prefixes: &[String]) -> Vec<Box<dyn crate::search::GpuSearcher>> {
+    match CudaSearcher::new(prefixes) {
+        Ok(s) => vec![Box::new(s) as Box<dyn crate::search::GpuSearcher>],
+        Err(e) => {
+            eprintln!("Warning: CUDA GPU unavailable ({}), using CPU only", e);
+            vec![]
+        }
+    }
+}
+
 /// Compile the kernel and return (module, context, stream).
 fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), CudaError> {
     let ctx = CudaContext::new(0).map_err(|e| {
@@ -63,9 +87,7 @@ fn compile_kernel() -> Result<(Arc<CudaModule>, Arc<CudaStream>), CudaError> {
     let ptx = cudarc::nvrtc::compile_ptx_with_opts(
         KERNEL_SRC,
         cudarc::nvrtc::CompileOptions {
-            options: vec![
-                "--device-as-default-execution-space".into(),
-            ],
+            options: vec!["--device-as-default-execution-space".into()],
             ..Default::default()
         },
     )
@@ -91,7 +113,9 @@ impl CudaSearcher {
 
         let ctx = stream.context();
         let sm_count = ctx
-            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
             .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
         let grid_size = (sm_count as u32) * 2;
 

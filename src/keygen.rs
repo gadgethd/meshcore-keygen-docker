@@ -66,7 +66,11 @@ mod tests {
         // Verify clamping was applied to the private key scalar
         assert_eq!(kp.private_key[0] & 7, 0, "low 3 bits should be cleared");
         assert_eq!(kp.private_key[31] & 128, 0, "high bit should be cleared");
-        assert_eq!(kp.private_key[31] & 64, 64, "second-highest bit should be set");
+        assert_eq!(
+            kp.private_key[31] & 64,
+            64,
+            "second-highest bit should be set"
+        );
 
         // Second half should match SHA-512 digest
         assert_eq!(&kp.private_key[32..], &hash[32..]);

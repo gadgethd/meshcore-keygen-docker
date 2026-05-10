@@ -17,6 +17,14 @@ pub struct SearchResult {
     pub attempts: u64,
     pub elapsed_secs: f64,
     pub seed: Option<String>,
+    pub master_seed: Option<String>,
+    pub counter: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// Error returned when a search completes without finding a match
