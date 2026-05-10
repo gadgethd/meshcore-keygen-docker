@@ -4,12 +4,46 @@ Vanity Ed25519 key generator for [MeshCore](https://github.com/ripplebiz/MeshCor
 
 ## Quick start (Docker)
 
+### 1. Install NVIDIA Container Toolkit
+
+The container requires the NVIDIA Container Toolkit so Docker can access the GPU.
+
+**Fedora / RHEL / CentOS:**
+```bash
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+  | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+
+sudo dnf install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+**Ubuntu / Debian:**
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
+
+Verify the toolkit is working before starting the container:
+```bash
+docker run --rm --gpus all nvidia/cuda:12.6.3-base-ubuntu24.04 nvidia-smi
+```
+
+### 2. Start the container
+
 ```bash
 docker compose up --build
 # Open http://localhost:8080
 ```
-
-Requires Docker with NVIDIA Container Toolkit for GPU support.
 
 ## Features
 
