@@ -119,7 +119,7 @@ impl Default for Settings {
             default_backend: "cpu".to_string(),
             default_benchmark_id: None,
             timezone: "UTC".to_string(),
-            hide_secrets: true,
+            hide_secrets: false,
             max_log_lines: 10000,
             bind_address: "0.0.0.0:8080".to_string(),
             password_hash: None,
