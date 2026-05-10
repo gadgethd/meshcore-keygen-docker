@@ -1,14 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
 import { api, SettingsData } from '../../api';
 
+interface Backend { name: string; type: string; available: boolean; description?: string; }
+
 export default function Settings() {
   const [s, setS] = useState<SettingsData | null>(null);
+  const [backends, setBackends] = useState<Backend[]>([]);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const savedT = useRef<ReturnType<typeof setTimeout>>();
   const debounceT = useRef<ReturnType<typeof setTimeout>>();
 
-  useEffect(() => { api.settings().then(setS).catch(() => setError('Failed to load')); }, []);
+  useEffect(() => {
+    api.settings().then(setS).catch(() => setError('Failed to load'));
+    api.devices().then((d: any) => setBackends(d.backends ?? [])).catch(() => {});
+  }, []);
 
   const update = async (k: string, v: unknown) => {
     if (!s) return; const prev = { ...s }; setS({ ...s, [k]: v }); setSaved(false);
@@ -37,7 +43,17 @@ export default function Settings() {
         </div>
         <div className="glass-card">
           <div className="panel-header"><span className="panel-title">Backend & CPU</span></div>
-          <Field label="Default Backend" v={s.default_backend} set={v => update('default_backend', v)} />
+          <div className="form-group">
+            <label className="form-label">Default Backend</label>
+            <select className="form-input" value={s.default_backend} onChange={e => update('default_backend', e.target.value)}>
+              {backends.filter(b => b.available).map(b => (
+                <option key={b.name} value={b.name}>
+                  {b.name.toUpperCase()}{b.description ? ` — ${b.description}` : ''}
+                </option>
+              ))}
+              {backends.length === 0 && <option value={s.default_backend}>{s.default_backend.toUpperCase()}</option>}
+            </select>
+          </div>
           <Field label="Reserved CPU Cores" v={s.reserved_cpu_cores} set={v => update('reserved_cpu_cores', Number(v))} type="number" />
           <Field label="Max Worker Threads" v={s.max_worker_threads ?? ''} set={v => update('max_worker_threads', v !== '' ? Number(v) : null)} type="number" placeholder="Auto" />
           <Field label="Checkpoint Interval (s)" v={s.checkpoint_interval_secs} set={v => update('checkpoint_interval_secs', Number(v))} type="number" />

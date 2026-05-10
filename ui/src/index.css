@@ -87,18 +87,21 @@ body {
   background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
   backdrop-filter: var(--blur-glass); -webkit-backdrop-filter: var(--blur-glass);
   border-right: 1px solid var(--glass-border);
-  display: flex; flex-direction: column; padding: 14px 0;
+  display: flex; flex-direction: column; padding: 0;
   overflow-y: auto; z-index: 10;
 }
 .sidebar-brand {
-  padding: 10px 18px 18px;
+  height: var(--topbar-height); min-height: var(--topbar-height);
+  display: flex; align-items: center;
+  padding: 0 18px;
   font-weight: 700; font-size: 15px; letter-spacing: 0.5px;
   background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
   background-clip: text;
-  border-bottom: 1px solid var(--glass-border); margin-bottom: 8px;
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
 }
-.sidebar-nav { flex:1; display:flex; flex-direction:column; gap:1px; padding:0 8px; }
+.sidebar-nav { flex:1; display:flex; flex-direction:column; gap:1px; padding:8px 8px 0; }
 .sidebar-link {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 14px; border-radius: var(--radius-md);
@@ -124,7 +127,7 @@ body {
   background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.025));
   backdrop-filter: var(--blur-glass); -webkit-backdrop-filter: var(--blur-glass);
   border-bottom: 1px solid var(--glass-border);
-  display: flex; align-items: center; padding: 0 20px; gap: 16px;
+  display: flex; align-items: center; padding: 0 24px; gap: 16px;
   font-size: 13px; z-index: 10;
 }
 .topbar-status { display: flex; align-items: center; gap: 10px; }
@@ -293,6 +296,7 @@ input:focus, select:focus, textarea:focus {
 }
 input::placeholder, textarea::placeholder { color: var(--text-muted); }
 select { cursor:pointer; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 10px center; padding-right:30px; }
+select option { background: #0c1120; color: rgba(255,255,255,0.91); }
 textarea { resize:vertical; min-height:60px; }
 
 /* ── Progress Bar ───────────────────────────── */

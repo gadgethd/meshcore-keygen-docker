@@ -9,7 +9,7 @@ const items: NavItem[] = [
   { to: '/queue', icon: '☰', label: 'Queue' },
   { to: '/results', icon: '✓', label: 'Results' },
   { to: '/benchmarks', icon: '⏱', label: 'Benchmarks' },
-  { to: '/schedules', icon: '⌛', label: 'Schedules' },
+  { to: '/schedules', icon: '↺', label: 'Schedules' },
   { to: '/settings', icon: '⚙', label: 'Settings' },
   { to: '/logs', icon: '☷', label: 'Logs' },
 ];
