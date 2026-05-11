@@ -25,7 +25,7 @@ use search::SearchHandle;
 #[derive(Parser)]
 #[command(name = "mc-keygen", version, about = "MeshCore vanity Ed25519 key generator")]
 struct Cli {
-    /// Hex prefix(es) to search for (1-8 chars, 0-9/A-F each)
+    /// Hex prefix(es) to search for (1-62 chars, 0-9/A-F each)
     #[arg(required = true)]
     prefix: Vec<String>,
 
@@ -38,24 +38,24 @@ struct Cli {
     json: bool,
 
     /// Force CPU-only search (no GPU even if available)
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "gpu")]
     #[arg(long, conflicts_with = "gpu_only")]
     cpu_only: bool,
 
     /// Force GPU-only search (no CPU threads)
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "gpu")]
     #[arg(long, conflicts_with = "cpu_only")]
     gpu_only: bool,
 
     /// Verify GPU keygen matches host-side reference (run 64 test indices and compare)
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "gpu")]
     #[arg(long)]
     verify: bool,
 
     /// Run GPU search continuously for N seconds, count actual matches, and
     /// compare against the rate-implied expected count. Useful for validating
     /// that the reported keys/sec isn't inflated by mid-launch early exits.
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     #[arg(long, value_name = "SECS")]
     benchmark: Option<u64>,
 }
@@ -63,9 +63,13 @@ struct Cli {
 fn validate_prefix(prefix: &str) -> Result<String, String> {
     let upper = prefix.to_ascii_uppercase();
 
-    if upper.is_empty() || upper.len() > 8 {
+    // Cap is 62 not 64: nibble 63 lands on the high nibble of pubkey[31], which
+    // contains the Ed25519 sign bit. The GPU kernel's fast path skips writing
+    // that bit (saves an fe_mul per iter), so a prefix that reads byte 31
+    // would compare against a zeroed sign bit and miss real matches.
+    if upper.is_empty() || upper.len() > 62 {
         return Err(format!(
-            "prefix must be 1-8 hex characters, got {} characters",
+            "prefix must be 1-62 hex characters, got {} characters",
             upper.len()
         ));
     }
@@ -356,16 +360,21 @@ fn try_init_gpu(prefixes: &[String]) -> Vec<Box<dyn search::GpuSearcher>> {
             }
         }
     }
-    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    #[cfg(not(feature = "gpu"))]
     {
         vec![]
     }
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 fn run_gpu_benchmark(prefixes: &[String], duration: std::time::Duration) {
     use std::time::Instant;
 
+    eprintln!("Benchmarking for {}s against prefix(es) {}...", duration.as_secs(), prefixes.join(", "));
+
+    // Inner loop reads `count_batch` off whichever backend is compiled in.
+    // CUDA wins if both features are enabled, matching `try_init_gpu`.
+    #[cfg(feature = "cuda")]
     let mut searcher = match gpu::CudaSearcher::new(prefixes) {
         Ok(s) => s,
         Err(e) => {
@@ -373,8 +382,15 @@ fn run_gpu_benchmark(prefixes: &[String], duration: std::time::Duration) {
             std::process::exit(1);
         }
     };
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let mut searcher = match metal_gpu::MetalSearcher::new(prefixes) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to init GPU: {}", e);
+            std::process::exit(1);
+        }
+    };
 
-    eprintln!("Benchmarking for {}s against prefix(es) {}...", duration.as_secs(), prefixes.join(", "));
     let start = Instant::now();
     let mut total_keys: u64 = 0;
     let mut total_matches: u64 = 0;
@@ -458,17 +474,17 @@ fn main() {
         format!(", {} prefixes", prefixes.len())
     };
 
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "gpu")]
     let cpu_only = cli.cpu_only;
-    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    #[cfg(not(feature = "gpu"))]
     let cpu_only = true;
 
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "gpu")]
     let gpu_only = cli.gpu_only;
-    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    #[cfg(not(feature = "gpu"))]
     let gpu_only = false;
 
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(feature = "gpu")]
     if cli.verify {
         eprint!("Compiling GPU kernel and running verification... ");
         #[cfg(feature = "cuda")]
@@ -487,7 +503,7 @@ fn main() {
         }
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "gpu")]
     if let Some(secs) = cli.benchmark {
         run_gpu_benchmark(&prefixes, std::time::Duration::from_secs(secs));
         std::process::exit(0);

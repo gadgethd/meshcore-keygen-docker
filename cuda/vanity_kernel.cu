@@ -3435,8 +3435,9 @@ extern "C" __global__ void vanity_search(
             fe_mul(y, batch_Y[i], batch_Z[i]);
             u8 pubkey[32];
             fe_tobytes(pubkey, y);
-            // Sign bit is in pubkey[31]; prefix check only touches bytes 0..4
-            // for our 1-8 hex char prefixes, so leaving it unset here is fine.
+            // Sign bit lives in the high nibble of pubkey[31]; host caps
+            // prefixes at 62 nibbles so the check never reads byte 31, and
+            // leaving the sign bit unset here is fine.
 
             if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
                 && check_any_prefix(pubkey, prefix_data, prefix_count)) {
