@@ -3394,10 +3394,18 @@ __device__ int check_any_prefix(const u8 *pubkey, const u8 *prefix_data,
     return 0;
 }
 
-// Sequential-scalar search: each thread does ONE scalarmult to derive its
-// starting point, then increments by +8B (cheap point addition) per iter.
-// The scalar advances in lockstep so we still emit the correct private key
-// on a match. The host draws a fresh OsRng start_scalar (clamped) per batch.
+// Batch size for Montgomery inversion. Each thread accumulates `VANITY_BATCH`
+// chain points, then inverts all their Z values in one shot (3N-3 muls +
+// 1 fe_invert instead of N fe_inverts). Must divide iters_per_thread evenly.
+#define VANITY_BATCH 16
+
+// Sequential-scalar search with Montgomery batch inversion. Each thread does
+// ONE scalarmult to derive its starting point, then iterates +8B (cheap point
+// add). Compression (which needs Z^{-1}) is deferred and batched: gather B
+// points, do one fe_invert for the whole batch, then check each. Skipping the
+// X*Z^{-1} multiply on non-matches saves another fe_mul per iter (the prefix
+// check only touches the low bytes of the encoded y, where the sign bit
+// doesn't reach).
 extern "C" __global__ void vanity_search(
     u8 *result, const u8 *prefix_data, unsigned int prefix_count,
     const u8 *start_scalar_bytes,
@@ -3405,7 +3413,7 @@ extern "C" __global__ void vanity_search(
 {
     unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Per-thread scalar = start + 8 * tid * iters_per_thread.
+    // Per-thread starting scalar = start + 8 * tid * iters_per_thread.
     u8 my_scalar[32];
     for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
     {
@@ -3422,36 +3430,90 @@ extern "C" __global__ void vanity_search(
     ge_p3 A;
     ge_scalarmult_base(&A, my_scalar);
 
-    for (unsigned long long iter = 0; iter < iters_per_thread; iter++) {
+    // Per-thread batch storage. fe is int32[10] = 40 bytes; total ~2.5 KB/thread
+    // for B=16. Expect compiler to spill to local memory but it's cached.
+    fe batch_X[VANITY_BATCH];
+    fe batch_Y[VANITY_BATCH];
+    fe batch_Z[VANITY_BATCH];
+    fe products[VANITY_BATCH];
+
+    unsigned long long batches = iters_per_thread / VANITY_BATCH;
+    for (unsigned long long b = 0; b < batches; b++) {
         if (*((volatile unsigned int *)result) != 0) return;
 
-        u8 pubkey[32];
-        ge_p3_tobytes(pubkey, &A);
-
-        if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
-            && check_any_prefix(pubkey, prefix_data, prefix_count)) {
-            unsigned int old = atomicCAS((unsigned int *)result, 0, 1);
-            if (old == 0) {
-                for (int i = 0; i < 32; i++) result[4 + i] = pubkey[i];
-                for (int i = 0; i < 32; i++) result[36 + i] = my_scalar[i];
-                // Prefix half of the expanded private key is generated host-side
-                // on match (independent OsRng draw); not produced here.
+        // Phase 1: snapshot (X,Y,Z) at each chain step and accumulate the
+        // running product of Zs. After this loop A has advanced past the batch.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            for (int k = 0; k < 10; k++) {
+                batch_X[i][k] = A.X[k];
+                batch_Y[i][k] = A.Y[k];
+                batch_Z[i][k] = A.Z[k];
             }
-            return;
+            if (i == 0) {
+                for (int k = 0; k < 10; k++) products[i][k] = batch_Z[i][k];
+            } else {
+                fe_mul(products[i], products[i-1], batch_Z[i]);
+            }
+            ge_p1p1 r;
+            ge_madd(&r, &A, &base[0][7]);
+            ge_p1p1_to_p3(&A, &r);
         }
 
-        // Advance: A += 8B, my_scalar += 8.
-        ge_p1p1 r;
-        ge_madd(&r, &A, &base[0][7]);
-        ge_p1p1_to_p3(&A, &r);
+        // Phase 2: one inversion of the full product.
+        fe all_inv;
+        fe_invert(all_inv, products[VANITY_BATCH - 1]);
 
-        unsigned int sum = (unsigned int)my_scalar[0] + 8u;
-        my_scalar[0] = (u8)(sum & 0xFFu);
-        unsigned int carry = sum >> 8;
-        for (int j = 1; j < 32 && carry; j++) {
-            unsigned int s = (unsigned int)my_scalar[j] + carry;
-            my_scalar[j] = (u8)(s & 0xFFu);
-            carry = s >> 8;
+        // Phase 3: backward pass to extract individual Z inverses. Overwrites
+        // batch_Z in place (its original values get rolled into `running`
+        // before being clobbered).
+        fe running;
+        for (int k = 0; k < 10; k++) running[k] = all_inv[k];
+        for (int i = VANITY_BATCH - 1; i > 0; i--) {
+            fe temp_inv;
+            fe_mul(temp_inv, running, products[i-1]);  // = Z_i^{-1}
+            fe new_running;
+            fe_mul(new_running, running, batch_Z[i]);  // = (Z_0 * ... * Z_{i-1})^{-1}
+            for (int k = 0; k < 10; k++) {
+                running[k] = new_running[k];
+                batch_Z[i][k] = temp_inv[k];
+            }
+        }
+        for (int k = 0; k < 10; k++) batch_Z[0][k] = running[k];
+
+        // Phase 4: compute y = Y/Z, encode, prefix-check each point.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            fe y;
+            fe_mul(y, batch_Y[i], batch_Z[i]);
+            u8 pubkey[32];
+            fe_tobytes(pubkey, y);
+            // Sign bit is in pubkey[31]; prefix check only touches bytes 0..4
+            // for our 1-8 hex char prefixes, so leaving it unset here is fine.
+
+            if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
+                && check_any_prefix(pubkey, prefix_data, prefix_count)) {
+                // Match path: compute x for the sign bit, derive matched scalar.
+                fe x;
+                fe_mul(x, batch_X[i], batch_Z[i]);
+                pubkey[31] ^= fe_isnegative(x) << 7;
+
+                u8 match_scalar[32];
+                for (int k = 0; k < 32; k++) match_scalar[k] = my_scalar[k];
+                unsigned long long matched_offset = 8ULL * (b * VANITY_BATCH + (unsigned long long)i);
+                unsigned long long carry = 0;
+                for (int k = 0; k < 32; k++) {
+                    unsigned long long byte_add = (k < 8) ? ((matched_offset >> (k * 8)) & 0xFFULL) : 0ULL;
+                    unsigned long long s = (unsigned long long)match_scalar[k] + byte_add + carry;
+                    match_scalar[k] = (u8)(s & 0xFFULL);
+                    carry = s >> 8;
+                }
+
+                unsigned int old = atomicCAS((unsigned int *)result, 0, 1);
+                if (old == 0) {
+                    for (int k = 0; k < 32; k++) result[4 + k] = pubkey[k];
+                    for (int k = 0; k < 32; k++) result[36 + k] = match_scalar[k];
+                }
+                return;
+            }
         }
     }
 }

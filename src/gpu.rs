@@ -230,6 +230,26 @@ impl CudaSearcher {
             public_key.copy_from_slice(&result_host[4..36]);
             let mut scalar = [0u8; 32];
             scalar.copy_from_slice(&result_host[36..68]);
+
+            // Defensive: verify scalar*B == pubkey via curve25519-dalek. Cheap
+            // (one scalarmult) and only runs on a match, but it catches kernel
+            // bugs (off-by-one in match index, batched-inversion mistakes, etc.)
+            // before a user trusts the resulting private key.
+            {
+                use curve25519_dalek::constants::ED25519_BASEPOINT_TABLE;
+                use curve25519_dalek::scalar::Scalar;
+                let s = Scalar::from_bytes_mod_order(scalar);
+                let cpu_pub = (&s * ED25519_BASEPOINT_TABLE).compress().to_bytes();
+                if cpu_pub != public_key {
+                    return Err(CudaError::CudaDriver(format!(
+                        "GPU match validation failed: scalar·B != pubkey\n  scalar:  {}\n  GPU pub: {}\n  CPU pub: {}",
+                        hex::encode_upper(scalar),
+                        hex::encode_upper(public_key),
+                        hex::encode_upper(cpu_pub),
+                    )));
+                }
+            }
+
             // Prefix half of the expanded private key is just fresh random
             // bytes -- there's no derivation requirement on it. The user
             // gets one match per search, so a single OsRng draw here is fine.
