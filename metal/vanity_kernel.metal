@@ -3289,15 +3289,21 @@ kernel void verify_keygen(
     ge_p3 A;
     ge_scalarmult_base(&A, my_scalar);
 
+    // Stage 8B (= base[0][7]) into thread space so ge_madd can take its
+    // address; MSL won't accept a `constant` pointer where `thread` is
+    // expected.
+    ge_precomp eight_B;
+    ge_precomp_copy_from_constant(&eight_B, &base[0][7]);
+
     for (unsigned int i = 0; i < count; i++) {
         u8 local_pubkey[32];
         ge_p3_tobytes(local_pubkey, &A);
         for (int j = 0; j < 32; j++) pubkeys[i * 32 + j] = local_pubkey[j];
         for (int j = 0; j < 32; j++) scalars[i * 32 + j] = my_scalar[j];
 
-        // A += 8B (base[0][7] = 8B as ge_precomp)
+        // A += 8B
         ge_p1p1 r;
-        ge_madd(&r, &A, &base[0][7]);
+        ge_madd(&r, &A, &eight_B);
         ge_p1p1_to_p3(&A, &r);
 
         // my_scalar += 8 (low-byte add with carry; stays clamped because we
@@ -3387,6 +3393,10 @@ kernel void vanity_search(
     ge_p3 A;
     ge_scalarmult_base(&A, my_scalar);
 
+    // Stage 8B into thread space (see verify_keygen for why).
+    ge_precomp eight_B;
+    ge_precomp_copy_from_constant(&eight_B, &base[0][7]);
+
     // Per-thread batch storage. fe is int32[10] = 40 bytes.
     fe batch_X[VANITY_BATCH];
     fe batch_Y[VANITY_BATCH];
@@ -3412,7 +3422,7 @@ kernel void vanity_search(
                 fe_mul(products[i], products[i-1], batch_Z[i]);
             }
             ge_p1p1 r;
-            ge_madd(&r, &A, &base[0][7]);
+            ge_madd(&r, &A, &eight_B);
             ge_p1p1_to_p3(&A, &r);
         }
 
@@ -3500,6 +3510,10 @@ kernel void vanity_count_matches(
     ge_p3 A;
     ge_scalarmult_base(&A, my_scalar);
 
+    // Stage 8B into thread space (see verify_keygen for why).
+    ge_precomp eight_B;
+    ge_precomp_copy_from_constant(&eight_B, &base[0][7]);
+
     fe batch_Y[VANITY_BATCH];
     fe batch_Z[VANITY_BATCH];
     fe products[VANITY_BATCH];
@@ -3521,7 +3535,7 @@ kernel void vanity_count_matches(
                 fe_mul(products[i], products[i-1], batch_Z[i]);
             }
             ge_p1p1 r;
-            ge_madd(&r, &A, &base[0][7]);
+            ge_madd(&r, &A, &eight_B);
             ge_p1p1_to_p3(&A, &r);
         }
 
