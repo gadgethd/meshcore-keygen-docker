@@ -53,6 +53,13 @@ struct Cli {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     #[arg(long)]
     verify: bool,
+
+    /// Run GPU search continuously for N seconds, count actual matches, and
+    /// compare against the rate-implied expected count. Useful for validating
+    /// that the reported keys/sec isn't inflated by mid-launch early exits.
+    #[cfg(feature = "cuda")]
+    #[arg(long, value_name = "SECS")]
+    benchmark: Option<u64>,
 }
 
 fn validate_prefix(prefix: &str) -> Result<String, String> {
@@ -357,6 +364,59 @@ fn try_init_gpu(prefixes: &[String]) -> Vec<Box<dyn search::GpuSearcher>> {
     }
 }
 
+#[cfg(feature = "cuda")]
+fn run_gpu_benchmark(prefixes: &[String], duration: std::time::Duration) {
+    use std::time::Instant;
+
+    let mut searcher = match gpu::CudaSearcher::new(prefixes) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to init GPU: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    eprintln!("Benchmarking for {}s against prefix(es) {}...", duration.as_secs(), prefixes.join(", "));
+    let start = Instant::now();
+    let mut total_keys: u64 = 0;
+    let mut total_matches: u64 = 0;
+    while start.elapsed() < duration {
+        match searcher.count_batch() {
+            Ok((keys, matches)) => {
+                total_keys = total_keys.wrapping_add(keys);
+                total_matches = total_matches.wrapping_add(matches as u64);
+            }
+            Err(e) => {
+                eprintln!("GPU error during benchmark: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    let rate = total_keys as f64 / elapsed;
+
+    let min_len = prefixes.iter().map(|p| p.len()).min().unwrap_or(1);
+    let same_len_count = prefixes.iter().filter(|p| p.len() == min_len).count() as f64;
+    let p_match = same_len_count / 16f64.powi(min_len as i32);
+    let expected = total_keys as f64 * p_match;
+    let ratio = if expected > 0.0 { total_matches as f64 / expected } else { 0.0 };
+
+    println!("Elapsed:                {:.2}s", elapsed);
+    println!("Reported keys checked:  {} ({:.2} GH/s)", format_number(total_keys), rate / 1e9);
+    println!("Matches found:          {}", format_number(total_matches));
+    println!("Expected matches:       {:.0} (= reported_keys × {} / 16^{})", expected, same_len_count as u64, min_len);
+    println!("Observed / expected:    {:.3}", ratio);
+    let stderr_pct = if total_matches > 0 { 100.0 / (total_matches as f64).sqrt() } else { f64::INFINITY };
+    println!("Poisson ±1σ on observed: ±{:.1}%", stderr_pct);
+    if total_matches < 25 {
+        println!("  (fewer than 25 matches; high Poisson variance — run longer or shorter prefix)");
+    } else if (ratio - 1.0).abs() > 3.0 * stderr_pct / 100.0 {
+        println!("  ^ deviation > 3σ: reported rate is probably off.");
+    } else {
+        println!("  (ratio within ~3σ of 1.0; reported rate looks honest)");
+    }
+}
+
 fn gpu_names_label(searchers: &[Box<dyn search::GpuSearcher>]) -> String {
     searchers
         .iter()
@@ -427,6 +487,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    if let Some(secs) = cli.benchmark {
+        run_gpu_benchmark(&prefixes, std::time::Duration::from_secs(secs));
+        std::process::exit(0);
     }
 
     let gpu_searchers = if cpu_only {

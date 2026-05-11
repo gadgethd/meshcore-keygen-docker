@@ -46,7 +46,9 @@ pub struct CudaBatchResult {
 pub struct CudaSearcher {
     stream: Arc<CudaStream>,
     func: CudaFunction,
+    count_func: CudaFunction,
     result_buf: CudaSlice<u8>,
+    count_buf: CudaSlice<u8>,
     grid_size: u32,
     prefix_data: Vec<u8>,
     prefix_count: u32,
@@ -117,6 +119,9 @@ impl CudaSearcher {
         let func = module
             .load_function("vanity_search")
             .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+        let count_func = module
+            .load_function("vanity_count_matches")
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let ctx = stream.context();
         let sm_count = ctx
@@ -147,6 +152,9 @@ impl CudaSearcher {
         let result_buf = stream
             .alloc_zeros::<u8>(100)
             .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+        let count_buf = stream
+            .alloc_zeros::<u8>(4)
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
 
         let device_name = ctx
             .name()
@@ -160,13 +168,73 @@ impl CudaSearcher {
         Ok(CudaSearcher {
             stream,
             func,
+            count_func,
             result_buf,
+            count_buf,
             grid_size,
             prefix_data,
             prefix_count,
             device_name,
             start_scalar,
         })
+    }
+
+    /// Launch one batch of the count-matches kernel for benchmarking. Returns
+    /// `(keys_checked, matches_found)`. Unlike `search_batch`, this kernel
+    /// processes the FULL iters_per_thread on every thread (no early exit on
+    /// match) and atomically tallies every prefix match it sees, so the
+    /// returned counts are exact and the host-reported throughput can be
+    /// cross-checked against observed match frequency.
+    pub fn count_batch(&mut self) -> Result<(u64, u32), CudaError> {
+        let total_threads = (self.grid_size * BLOCK_SIZE) as u64;
+        let keys_checked = total_threads * ITERS_PER_THREAD;
+
+        self.stream
+            .memset_zeros(&mut self.count_buf)
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+
+        let prefix_dev = self
+            .stream
+            .clone_htod(&self.prefix_data)
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+        let start_scalar_dev = self
+            .stream
+            .clone_htod(&self.start_scalar.to_vec())
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+
+        let cfg = LaunchConfig {
+            grid_dim: (self.grid_size, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            self.stream
+                .launch_builder(&self.count_func)
+                .arg(&mut self.count_buf)
+                .arg(&prefix_dev)
+                .arg(&self.prefix_count)
+                .arg(&start_scalar_dev)
+                .arg(&ITERS_PER_THREAD)
+                .launch(cfg)
+        }
+        .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+
+        let counter_host: Vec<u8> = self
+            .stream
+            .clone_dtoh(&self.count_buf)
+            .map_err(|e| CudaError::CudaDriver(format!("{}", e)))?;
+        let matches = u32::from_le_bytes([
+            counter_host[0], counter_host[1], counter_host[2], counter_host[3],
+        ]);
+
+        advance_scalar(&mut self.start_scalar, 8u64.wrapping_mul(keys_checked));
+
+        Ok((keys_checked, matches))
     }
 
     /// Launch one batch of GPU kernel and check for results.

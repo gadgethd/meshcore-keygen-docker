@@ -3517,3 +3517,94 @@ extern "C" __global__ void vanity_search(
         }
     }
 }
+
+// Benchmark variant: identical search math to vanity_search, but never exits
+// early and counts EVERY match into an atomic counter instead of emitting the
+// first one. Used by --benchmark to validate the reported throughput against
+// observed match frequency. Each thread does the full iters_per_thread of
+// work, so the host-side keys_checked count matches what was actually tested.
+extern "C" __global__ void vanity_count_matches(
+    unsigned int *match_counter,
+    const u8 *prefix_data, unsigned int prefix_count,
+    const u8 *start_scalar_bytes,
+    unsigned long long iters_per_thread)
+{
+    unsigned int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    u8 my_scalar[32];
+    for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
+    {
+        unsigned long long offset = 8ULL * (unsigned long long)tid * iters_per_thread;
+        unsigned long long carry = 0;
+        for (int i = 0; i < 32; i++) {
+            unsigned long long byte_add = (i < 8) ? ((offset >> (i * 8)) & 0xFFULL) : 0ULL;
+            unsigned long long s = (unsigned long long)my_scalar[i] + byte_add + carry;
+            my_scalar[i] = (u8)(s & 0xFFULL);
+            carry = s >> 8;
+        }
+    }
+
+    ge_p3 A;
+    ge_scalarmult_base(&A, my_scalar);
+
+    fe batch_Y[VANITY_BATCH];
+    fe batch_Z[VANITY_BATCH];
+    fe products[VANITY_BATCH];
+
+    unsigned int local_matches = 0;
+
+    unsigned long long batches = iters_per_thread / VANITY_BATCH;
+    for (unsigned long long b = 0; b < batches; b++) {
+        // Phase 1: snapshot (Y,Z) and accumulate products. X not needed since
+        // we only count matches, not emit pubkeys.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            for (int k = 0; k < 10; k++) {
+                batch_Y[i][k] = A.Y[k];
+                batch_Z[i][k] = A.Z[k];
+            }
+            if (i == 0) {
+                for (int k = 0; k < 10; k++) products[i][k] = batch_Z[i][k];
+            } else {
+                fe_mul(products[i], products[i-1], batch_Z[i]);
+            }
+            ge_p1p1 r;
+            ge_madd(&r, &A, &base[0][7]);
+            ge_p1p1_to_p3(&A, &r);
+        }
+
+        // Phase 2: one inversion.
+        fe all_inv;
+        fe_invert(all_inv, products[VANITY_BATCH - 1]);
+
+        // Phase 3: backward extract Z inverses.
+        fe running;
+        for (int k = 0; k < 10; k++) running[k] = all_inv[k];
+        for (int i = VANITY_BATCH - 1; i > 0; i--) {
+            fe temp_inv;
+            fe_mul(temp_inv, running, products[i-1]);
+            fe new_running;
+            fe_mul(new_running, running, batch_Z[i]);
+            for (int k = 0; k < 10; k++) {
+                running[k] = new_running[k];
+                batch_Z[i][k] = temp_inv[k];
+            }
+        }
+        for (int k = 0; k < 10; k++) batch_Z[0][k] = running[k];
+
+        // Phase 4: count matches.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            fe y;
+            fe_mul(y, batch_Y[i], batch_Z[i]);
+            u8 pubkey[32];
+            fe_tobytes(pubkey, y);
+            if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
+                && check_any_prefix(pubkey, prefix_data, prefix_count)) {
+                local_matches++;
+            }
+        }
+    }
+
+    if (local_matches > 0) {
+        atomicAdd(match_counter, local_matches);
+    }
+}
