@@ -13,7 +13,7 @@
 //   BSD 3-Clause license (see cuda/THIRD-PARTY-NOTICES for full text)
 //
 // This is an altered source version adapted for NVRTC single-file
-// compilation. Philox4x64-10 and vanity search kernels are original work.
+// compilation. The vanity search and count kernels are original work.
 // ============================================================================
 
 // NVRTC doesn't have stdint.h, define types inline
@@ -3258,60 +3258,9 @@ void __device__ ge_tobytes(unsigned char *s, const ge_p2 *h) {
     s[31] ^= fe_isnegative(x) << 7;
 }
 
-// ============================================================================
-// Philox4x64-10 CSPRNG
-// Counter-based RNG (D.E. Shaw / Random123). 128-bit key + 256-bit counter
-// produce 256 bits of pseudorandom output per call. Output is hidden behind
-// Curve25519 DLog before any value is exposed, so the lack of formal CSPRNG
-// status is irrelevant for this use; we get 2^128 brute-force resistance from
-// the host-supplied OsRng key.
-// ============================================================================
-
+// Short type aliases used by the vanity kernels below.
 typedef unsigned long long u64;
-typedef unsigned int       u32_t;
 typedef unsigned char      u8;
-
-// CUDA hardware 64x64 -> high 64 bits of the 128-bit product.
-extern "C" __device__ unsigned long long __umul64hi(unsigned long long, unsigned long long);
-
-__device__ __forceinline__ void philox4x64_10(u64 ctr[4], u64 key[2]) {
-    const u64 M0 = 0xD2E7470EE14C6C93ULL;
-    const u64 M1 = 0xCA5A826395121157ULL;
-    const u64 W0 = 0x9E3779B97F4A7C15ULL;
-    const u64 W1 = 0xBB67AE8584CAA73BULL;
-    #pragma unroll
-    for (int r = 0; r < 10; r++) {
-        if (r > 0) { key[0] += W0; key[1] += W1; }
-        u64 hi0 = __umul64hi(M0, ctr[0]);
-        u64 lo0 = M0 * ctr[0];
-        u64 hi1 = __umul64hi(M1, ctr[2]);
-        u64 lo1 = M1 * ctr[2];
-        u64 n0 = hi1 ^ ctr[1] ^ key[0];
-        u64 n1 = lo1;
-        u64 n2 = hi0 ^ ctr[3] ^ key[1];
-        u64 n3 = lo0;
-        ctr[0] = n0; ctr[1] = n1; ctr[2] = n2; ctr[3] = n3;
-    }
-}
-
-// Produce 32 little-endian bytes from one Philox4x64-10 call.
-__device__ __forceinline__ void philox_block32(u64 k0, u64 k1, u64 idx, u64 side, u8 *out32) {
-    u64 key[2] = { k0, k1 };
-    u64 ctr[4] = { idx, side, 0, 0 };
-    philox4x64_10(ctr, key);
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        u64 v = ctr[i];
-        out32[i*8 + 0] = (u8)(v);
-        out32[i*8 + 1] = (u8)(v >> 8);
-        out32[i*8 + 2] = (u8)(v >> 16);
-        out32[i*8 + 3] = (u8)(v >> 24);
-        out32[i*8 + 4] = (u8)(v >> 32);
-        out32[i*8 + 5] = (u8)(v >> 40);
-        out32[i*8 + 6] = (u8)(v >> 48);
-        out32[i*8 + 7] = (u8)(v >> 56);
-    }
-}
 
 // ============================================================================
 // Verification kernel
