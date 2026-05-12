@@ -206,15 +206,18 @@ fn run_job_sync(
             break;
         }
         if cancel.load(Ordering::Relaxed) {
+            handle.request_stop();
             break;
         }
         if let Some(limit) = max_attempts {
             if handle.stats(0).attempts >= limit {
+                handle.request_stop();
                 break;
             }
         }
         if let Some(limit) = max_runtime {
             if start.elapsed().as_secs() >= limit {
+                handle.request_stop();
                 break;
             }
         }
@@ -246,82 +249,82 @@ fn run_job_sync(
     let stats = handle.stats(0);
     let found = handle.is_done();
     let cancelled = cancel.load(Ordering::Relaxed);
+    if !found {
+        handle.request_stop();
+    }
+    let finish_result = handle.finish();
 
-    if found {
-        match handle.finish() {
-            Ok(result) => {
-                let db = lock_db(&db);
-                let record = ResultRecord {
-                    id: Uuid::new_v4().to_string(),
-                    job_id: job_id.clone(),
-                    prefix: result.matched_prefix.clone(),
-                    public_key: result.public_key.clone(),
-                    private_key: result.private_key.clone(),
-                    candidate_seed: result.seed.clone(),
-                    master_seed: result.master_seed.clone(),
-                    counter: result.counter,
-                    attempts: result.attempts,
-                    elapsed_seconds: result.elapsed_secs,
-                    keys_per_second: if result.elapsed_secs > 0.0 {
-                        result.attempts as f64 / result.elapsed_secs
-                    } else {
-                        0.0
-                    },
-                    backend: backend.clone(),
-                    device: if has_gpu {
-                        #[cfg(feature = "cuda")]
-                        {
-                            crate::gpu::detect_cuda().1.unwrap_or_default()
-                        }
-                        #[cfg(not(feature = "cuda"))]
-                        {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    },
-                    created_at: chrono_now(),
-                };
-                let _ = dbmod::insert_result(&db, &record);
-                if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
-                    j.status = JobStatus::Completed;
-                    j.attempts_done = stats.attempts;
-                    j.keys_per_second = stats.keys_per_sec;
-                    j.elapsed_seconds = elapsed.as_secs_f64();
-                    let _ = dbmod::update_job(&db, &j);
-                }
-                logs::log(
-                    db_pool,
-                    "info",
-                    Some(&job_id),
-                    &format!("Match found: {}", result.matched_prefix),
-                );
-            }
-            Err(e) => {
-                let db = lock_db(&db);
-                if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
-                    j.status = JobStatus::Failed;
-                    j.notes = Some(format!("Search error: {}", e));
-                    let _ = dbmod::update_job(&db, &j);
-                }
-                logs::log(
-                    db_pool,
-                    "error",
-                    Some(&job_id),
-                    &format!("Search failed: {}", e),
-                );
-            }
-        }
-    } else if cancelled {
+    if let Ok(result) = finish_result {
         let db = lock_db(&db);
+        let record = ResultRecord {
+            id: Uuid::new_v4().to_string(),
+            job_id: job_id.clone(),
+            prefix: result.matched_prefix.clone(),
+            public_key: result.public_key.clone(),
+            private_key: result.private_key.clone(),
+            candidate_seed: result.seed.clone(),
+            master_seed: result.master_seed.clone(),
+            counter: result.counter,
+            attempts: result.attempts,
+            elapsed_seconds: result.elapsed_secs,
+            keys_per_second: if result.elapsed_secs > 0.0 {
+                result.attempts as f64 / result.elapsed_secs
+            } else {
+                0.0
+            },
+            backend: backend.clone(),
+            device: if has_gpu {
+                #[cfg(feature = "cuda")]
+                {
+                    crate::gpu::detect_cuda().1.unwrap_or_default()
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    String::new()
+                }
+            } else {
+                String::new()
+            },
+            created_at: chrono_now(),
+        };
+        let _ = dbmod::insert_result(&db, &record);
         if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
-            j.status = JobStatus::Paused;
+            j.status = JobStatus::Completed;
             j.attempts_done = stats.attempts;
             j.keys_per_second = stats.keys_per_sec;
             j.elapsed_seconds = elapsed.as_secs_f64();
             let _ = dbmod::update_job(&db, &j);
         }
-        logs::log(db_pool, "info", Some(&job_id), "Job paused by user");
+        logs::log(
+            db_pool,
+            "info",
+            Some(&job_id),
+            &format!("Match found: {}", result.matched_prefix),
+        );
+    } else if cancelled {
+        let db = lock_db(&db);
+        if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {
+            let was_stopped = j.status == JobStatus::Stopped;
+            j.status = if was_stopped {
+                JobStatus::Stopped
+            } else {
+                JobStatus::Paused
+            };
+            j.attempts_done = stats.attempts;
+            j.keys_per_second = stats.keys_per_sec;
+            j.elapsed_seconds = elapsed.as_secs_f64();
+            let _ = dbmod::update_job(&db, &j);
+            logs::log(
+                db_pool,
+                "info",
+                Some(&job_id),
+                if was_stopped {
+                    "Job stopped by user"
+                } else {
+                    "Job paused by user"
+                },
+            );
+        }
     } else {
         let db = lock_db(&db);
         if let Ok(Some(mut j)) = dbmod::get_job(&db, &job_id) {

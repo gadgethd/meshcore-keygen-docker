@@ -191,6 +191,7 @@ fn run_benchmark_sync(
             break;
         }
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            handle.request_stop();
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -211,6 +212,9 @@ fn run_benchmark_sync(
     let elapsed = start.elapsed();
     let stats = handle.stats(0);
     let found = handle.is_done();
+    if !found {
+        handle.request_stop();
+    }
     let kps = if elapsed.as_secs_f64() > 0.0 {
         stats.attempts as f64 / elapsed.as_secs_f64()
     } else {

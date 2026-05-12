@@ -142,6 +142,7 @@ struct MatchResult {
 /// Exposes atomics so a TUI render loop can poll progress directly.
 pub struct SearchHandle {
     found: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
     attempts: Arc<AtomicU64>,
     result: Arc<Mutex<Option<MatchResult>>>,
     start: Instant,
@@ -161,6 +162,7 @@ impl SearchHandle {
                 .collect(),
         );
         let found = Arc::new(AtomicBool::new(false));
+        let stop_requested = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU64::new(0));
         let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
 
@@ -169,6 +171,7 @@ impl SearchHandle {
             workers.push(spawn_cpu_worker(
                 Arc::clone(&matchers),
                 Arc::clone(&found),
+                Arc::clone(&stop_requested),
                 Arc::clone(&attempts),
                 Arc::clone(&result),
             ));
@@ -176,6 +179,7 @@ impl SearchHandle {
 
         SearchHandle {
             found,
+            stop_requested,
             attempts,
             result,
             start: Instant::now(),
@@ -189,6 +193,11 @@ impl SearchHandle {
     /// Check if a match has been found.
     pub fn is_done(&self) -> bool {
         self.found.load(Ordering::Acquire)
+    }
+
+    /// Ask worker threads to exit without treating the search as successful.
+    pub fn request_stop(&self) {
+        self.stop_requested.store(true, Ordering::Release);
     }
 
     /// Get current search statistics.
@@ -255,6 +264,7 @@ impl SearchHandle {
                 .collect(),
         );
         let found = Arc::new(AtomicBool::new(false));
+        let stop_requested = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU64::new(0));
         let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
         let state_arc = Arc::new(Mutex::new(Some(state.clone())));
@@ -264,6 +274,7 @@ impl SearchHandle {
         for worker_id in 0..num_threads {
             let matchers = Arc::clone(&matchers);
             let found = Arc::clone(&found);
+            let stop_requested = Arc::clone(&stop_requested);
             let total_attempts = Arc::clone(&attempts);
             let result = Arc::clone(&result);
             let state_arc = Arc::clone(&state_arc);
@@ -282,7 +293,8 @@ impl SearchHandle {
                     let mut local_state = worker_state;
                     let mut local_count: u64 = 0;
 
-                    while !found.load(Ordering::Acquire) {
+                    while !found.load(Ordering::Acquire) && !stop_requested.load(Ordering::Acquire)
+                    {
                         let seed = local_state.next_seed();
                         let kp = generate_keypair(&seed);
                         local_count += 1;
@@ -330,6 +342,7 @@ impl SearchHandle {
 
         SearchHandle {
             found,
+            stop_requested,
             attempts,
             result,
             start: Instant::now(),
@@ -419,6 +432,7 @@ impl SearchHandle {
                 .collect(),
         );
         let found = Arc::new(AtomicBool::new(false));
+        let stop_requested = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU64::new(0));
         let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
 
@@ -427,14 +441,18 @@ impl SearchHandle {
             workers.push(thread::spawn({
                 let matchers = Arc::clone(&matchers);
                 let found = Arc::clone(&found);
+                let stop_requested = Arc::clone(&stop_requested);
                 let attempts = Arc::clone(&attempts);
                 let result = Arc::clone(&result);
-                move || gpu_dispatch_loop(searcher, matchers, found, attempts, result)
+                move || {
+                    gpu_dispatch_loop(searcher, matchers, found, stop_requested, attempts, result)
+                }
             }));
         }
 
         SearchHandle {
             found,
+            stop_requested,
             attempts,
             result,
             start: Instant::now(),
@@ -458,6 +476,7 @@ impl SearchHandle {
                 .collect(),
         );
         let found = Arc::new(AtomicBool::new(false));
+        let stop_requested = Arc::new(AtomicBool::new(false));
         let attempts = Arc::new(AtomicU64::new(0));
         let result: Arc<Mutex<Option<MatchResult>>> = Arc::new(Mutex::new(None));
 
@@ -468,6 +487,7 @@ impl SearchHandle {
             workers.push(spawn_cpu_worker(
                 Arc::clone(&matchers),
                 Arc::clone(&found),
+                Arc::clone(&stop_requested),
                 Arc::clone(&attempts),
                 Arc::clone(&result),
             ));
@@ -478,14 +498,18 @@ impl SearchHandle {
             workers.push(thread::spawn({
                 let matchers = Arc::clone(&matchers);
                 let found = Arc::clone(&found);
+                let stop_requested = Arc::clone(&stop_requested);
                 let attempts = Arc::clone(&attempts);
                 let result = Arc::clone(&result);
-                move || gpu_dispatch_loop(searcher, matchers, found, attempts, result)
+                move || {
+                    gpu_dispatch_loop(searcher, matchers, found, stop_requested, attempts, result)
+                }
             }));
         }
 
         SearchHandle {
             found,
+            stop_requested,
             attempts,
             result,
             start: Instant::now(),
@@ -517,6 +541,7 @@ const CHAIN_BATCH: usize = 16;
 fn spawn_cpu_worker(
     matchers: Arc<Vec<(String, PrefixMatcher)>>,
     found: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
     attempts: Arc<AtomicU64>,
     result: Arc<Mutex<Option<MatchResult>>>,
 ) -> JoinHandle<()> {
@@ -533,7 +558,7 @@ fn spawn_cpu_worker(
         // BATCH_SIZE-aligned boundaries instead.
         let mut local_count: u64 = 0;
 
-        while !found.load(Ordering::Relaxed) {
+        while !found.load(Ordering::Relaxed) && !stop_requested.load(Ordering::Relaxed) {
             // Stage CHAIN_BATCH points: batch_points[i] = point + i·8B.
             // After the closure runs CHAIN_BATCH times, `next_point` ends up at
             // point + CHAIN_BATCH·8B -- the base for the next iteration.
@@ -601,6 +626,7 @@ fn gpu_dispatch_loop(
     mut searcher: Box<dyn GpuSearcher>,
     matchers: Arc<Vec<(String, PrefixMatcher)>>,
     found: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
     attempts: Arc<AtomicU64>,
     result: Arc<Mutex<Option<MatchResult>>>,
 ) {
@@ -608,7 +634,7 @@ fn gpu_dispatch_loop(
     OsRng.fill_bytes(&mut nonce_bytes);
     let mut base_nonce: u64 = u64::from_le_bytes(nonce_bytes);
 
-    while !found.load(Ordering::Relaxed) {
+    while !found.load(Ordering::Relaxed) && !stop_requested.load(Ordering::Relaxed) {
         match searcher.search_batch(base_nonce) {
             Ok(batch_result) => {
                 attempts.fetch_add(batch_result.keys_checked, Ordering::Relaxed);
@@ -773,5 +799,13 @@ mod tests {
             hex::encode_upper(scalar),
             result.public_key
         );
+    }
+
+    #[test]
+    fn search_handle_stop_exits_workers_without_result() {
+        let handle = SearchHandle::start(&["A".repeat(62)], 2);
+        handle.request_stop();
+        let result = handle.finish();
+        assert!(result.is_err(), "stopped search should not report a match");
     }
 }
