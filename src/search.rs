@@ -304,17 +304,23 @@ impl SearchHandle {
     }
 }
 
-/// Spawn one CPU worker thread that scans via a `+8B` chain.
+/// Per worker: number of chained points compressed under one batched
+/// inversion. Mirrors the GPU kernel's VANITY_BATCH = 16.
+const CHAIN_BATCH: usize = 16;
+
+/// Spawn one CPU worker thread that scans via a `+8B` chain with
+/// Montgomery batched compression.
 ///
 /// Each worker draws a single random clamped scalar, does ONE
-/// `mul_base_clamped` to get its starting point, then iterates
-/// `point += 8·B` (cheap point add) while incrementing the scalar by 8
-/// in lockstep. This mirrors the GPU strategy: one heavy scalarmult
-/// per chain, then cheap chain steps. Compression still costs one
-/// `Z⁻¹` per iter -- curve25519-dalek's internals are `pub(crate)` so
-/// the GPU's batched-inversion / deferred-sign-bit tricks can't be
-/// applied from outside the crate, but skipping the per-attempt
-/// `mul_base_clamped` is the big win.
+/// `mul_base_clamped` to get its starting point, then in each iteration
+/// chains `CHAIN_BATCH` points via cheap point-adds and compresses them
+/// all with one batched inversion (`EdwardsPoint::compress_batch`). The
+/// scalar accumulator tracks the base of each batch so a match at index
+/// `i` emits `scalar + 8·i` as the private-key scalar.
+///
+/// This mirrors the GPU strategy: one heavy scalarmult per chain, then
+/// `N` cheap chain steps amortizing one field inversion. Per-iter cost
+/// goes from ~265 fe_muls (one full `compress`) to ~20 (batched).
 fn spawn_cpu_worker(
     matchers: Arc<Vec<(String, PrefixMatcher)>>,
     found: Arc<AtomicBool>,
@@ -329,18 +335,35 @@ fn spawn_cpu_worker(
         clamp_scalar(&mut scalar);
         let mut point: EdwardsPoint = EdwardsPoint::mul_base_clamped(scalar);
 
+        // Number of attempts processed but not yet flushed to the shared atomic.
+        // Flushing every key would dominate at >1M keys/sec; we flush on
+        // BATCH_SIZE-aligned boundaries instead.
         let mut local_count: u64 = 0;
 
         while !found.load(Ordering::Relaxed) {
-            let public_key = point.compress().to_bytes();
-            local_count += 1;
+            // Stage CHAIN_BATCH points: batch_points[i] = point + i·8B.
+            // After the closure runs CHAIN_BATCH times, `next_point` ends up at
+            // point + CHAIN_BATCH·8B -- the base for the next iteration.
+            let mut next_point = point;
+            let batch_points: [EdwardsPoint; CHAIN_BATCH] = core::array::from_fn(|_| {
+                let cur = next_point;
+                next_point += eight_b;
+                cur
+            });
 
-            if local_count % BATCH_SIZE == 0 {
-                attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
-            }
+            // One inversion amortized across all CHAIN_BATCH points.
+            let compressed = EdwardsPoint::compress_batch::<CHAIN_BATCH>(&batch_points);
 
-            if !should_skip(&public_key) {
-                if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&public_key)) {
+            for (i, c) in compressed.iter().enumerate() {
+                let public_key = c.to_bytes();
+                if should_skip(&public_key) {
+                    continue;
+                }
+                if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&public_key))
+                {
+                    let mut match_scalar = scalar;
+                    advance_scalar(&mut match_scalar, 8 * i as u64);
+
                     // Prefix half of the expanded private key is just fresh
                     // random bytes -- there's no derivation requirement on
                     // it. One match per search, so a single OsRng draw is
@@ -348,10 +371,10 @@ fn spawn_cpu_worker(
                     let mut prefix_half = [0u8; 32];
                     OsRng.fill_bytes(&mut prefix_half);
                     let mut private_key = [0u8; 64];
-                    private_key[..32].copy_from_slice(&scalar);
+                    private_key[..32].copy_from_slice(&match_scalar);
                     private_key[32..].copy_from_slice(&prefix_half);
 
-                    attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+                    attempts.fetch_add(local_count + i as u64 + 1, Ordering::Relaxed);
                     found.store(true, Ordering::Relaxed);
                     *result.lock().unwrap() = Some(MatchResult {
                         keypair: MeshCoreKeypair {
@@ -364,11 +387,16 @@ fn spawn_cpu_worker(
                 }
             }
 
-            point += eight_b;
-            advance_scalar(&mut scalar, 8);
+            local_count += CHAIN_BATCH as u64;
+            if local_count >= BATCH_SIZE {
+                attempts.fetch_add(local_count, Ordering::Relaxed);
+                local_count = 0;
+            }
+            point = next_point;
+            advance_scalar(&mut scalar, 8 * CHAIN_BATCH as u64);
         }
 
-        attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+        attempts.fetch_add(local_count, Ordering::Relaxed);
     })
 }
 

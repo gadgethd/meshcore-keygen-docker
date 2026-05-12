@@ -2,6 +2,7 @@
 name = "mc-keygen"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "MeshCore vanity Ed25519 key generator"
 license = "MIT OR Apache-2.0"
 
@@ -15,7 +16,7 @@ metal = ["gpu", "dep:metal"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-curve25519-dalek = { version = "4", features = ["precomputed-tables"] }
+curve25519-dalek = { version = "=5.0.0-pre.6", features = ["precomputed-tables"] }
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
