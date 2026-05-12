@@ -1,16 +1,26 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { api, SystemStatus } from '../../api';
+import { api, Job, SystemStatus } from '../../api';
 import { MetricCard, StatusChip, PrefixBadge, DeviceBadge, ProbabilityProgress, CopyButton, TimeDisplay, EmptyState, formatKps, formatNum, formatPct } from '../shared';
 
 export default function ActiveJob() {
   const [s, setS] = useState<SystemStatus | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [error, setError] = useState('');
   const mounted = useRef(true);
 
+  const load = async () => {
+    const [status, allJobs] = await Promise.all([api.status(), api.jobs()]);
+    if (mounted.current) {
+      setS(status);
+      setJobs(allJobs);
+      setError('');
+    }
+  };
+
   useEffect(() => {
     mounted.current = true;
-    const poll = () => api.status().then(v => { if (mounted.current) { setS(v); setError(''); } }).catch(() => {});
+    const poll = () => load().catch(() => {});
     poll();
     const i = setInterval(poll, 1000);
     return () => { mounted.current = false; clearInterval(i); };
@@ -18,16 +28,19 @@ export default function ActiveJob() {
 
   const job = s?.active_job;
   if (!s) return <div className="glass-card"><div className="skeleton skeleton-value" /></div>;
+  const pausedJobs = jobs.filter(j => j.status === 'paused' && j.id !== job?.id);
+  const act = async (fn: () => Promise<any>) => { try { await fn(); await load(); } catch(e: any) { setError(e.message); } };
+
   if (!job) return (
-    <EmptyState icon="▶" title="No Active Job" desc="Start a new search from the New Job page" action={<Link to="/new"><button className="primary">Create Job</button></Link>} />
+    <div>
+      <EmptyState icon="▶" title="No Active Job" desc="Start a new search from the New Job page" action={<Link to="/new"><button className="primary">Create Job</button></Link>} />
+      {error && <div className="error-banner">{error}</div>}
+      <PausedJobsPanel jobs={pausedJobs} onResume={(pausedJob) => act(() => api.resumeJob(pausedJob.id))} />
+    </div>
   );
 
-  const minLen = Math.min(...job.prefixes.map(p => p.length));
-  const sameLenCount = job.prefixes.filter(p => p.length === minLen).length;
-  const expected = (16 ** minLen) / Math.max(sameLenCount, 1);
+  const expected = expectedAttempts(job);
   const prob = 1 - Math.exp(-job.attempts_done / expected);
-
-  const act = async (fn: () => Promise<any>) => { try { await fn(); } catch(e: any) { setError(e.message); } };
 
   return (
     <div>
@@ -80,6 +93,54 @@ export default function ActiveJob() {
           </div>
         </div>
       </div>
+
+      <PausedJobsPanel jobs={pausedJobs} onResume={(pausedJob) => act(() => api.resumeJob(pausedJob.id))} />
     </div>
   );
+}
+
+function PausedJobsPanel({ jobs, onResume }: { jobs: Job[]; onResume: (job: Job) => void }) {
+  if (jobs.length === 0) return null;
+
+  return (
+    <div className="glass-card" style={{ marginTop: 20 }}>
+      <div className="panel-header">
+        <span className="panel-title">Paused Jobs</span>
+        <span className="text-muted" style={{ fontSize: 12 }}>{jobs.length} ready to resume</span>
+      </div>
+      <div className="paused-job-list">
+        {jobs.map(job => (
+          <div key={job.id} className="paused-job-row">
+            <div className="paused-job-main">
+              <div className="paused-job-title">
+                <StatusChip status={job.status} />
+                <strong>{job.name || 'Paused Search'}</strong>
+              </div>
+              <div className="paused-job-prefixes">
+                {job.prefixes.map(p => <PrefixBadge key={p} prefix={p} />)}
+              </div>
+            </div>
+            <div className="paused-job-stats">
+              <div>
+                <span className="text-muted">Attempts</span>
+                <strong className="tabular mono">{formatNum(job.attempts_done)}</strong>
+              </div>
+              <div>
+                <span className="text-muted">Elapsed</span>
+                <strong className="tabular"><TimeDisplay seconds={job.elapsed_seconds} /></strong>
+              </div>
+            </div>
+            <button className="primary" onClick={() => onResume(job)}>Resume</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function expectedAttempts(job: Job) {
+  if (job.prefixes.length === 0) return 1;
+  const minLen = Math.min(...job.prefixes.map(p => p.length));
+  const sameLenCount = job.prefixes.filter(p => p.length === minLen).length;
+  return (16 ** minLen) / Math.max(sameLenCount, 1);
 }
