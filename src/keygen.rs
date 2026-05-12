@@ -37,37 +37,6 @@ pub fn generate_keypair(seed: &[u8; 32]) -> MeshCoreKeypair {
     }
 }
 
-/// Build a MeshCore keypair directly from 64 bytes of cryptographic randomness:
-/// `scalar_src` (clamped to form the scalar) and `prefix` (used as the second half
-/// of the expanded private key, fed into the signing nonce hash).
-///
-/// This skips the SHA-512 derivation step in `generate_keypair`, since the seed
-/// it would expand from is not exposed. Used by the CPU search loop with 64
-/// bytes drawn directly from `OsRng` per attempt. (The GPU search path produces
-/// its scalar on-device via the `+8B` chain and only calls into host code on
-/// the rare match.)
-pub fn generate_keypair_from_random_bytes(
-    scalar_src: &[u8; 32],
-    prefix: &[u8; 32],
-) -> MeshCoreKeypair {
-    let mut scalar_bytes = *scalar_src;
-    scalar_bytes[0] &= 248;
-    scalar_bytes[31] &= 63;
-    scalar_bytes[31] |= 64;
-
-    let public_point: EdwardsPoint = EdwardsPoint::mul_base_clamped(scalar_bytes);
-    let public_key = public_point.compress().to_bytes();
-
-    let mut private_key = [0u8; 64];
-    private_key[..32].copy_from_slice(&scalar_bytes);
-    private_key[32..].copy_from_slice(prefix);
-
-    MeshCoreKeypair {
-        public_key,
-        private_key,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

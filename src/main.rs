@@ -1,4 +1,3 @@
-mod keygen;
 #[cfg(feature = "cuda")]
 mod gpu;
 #[cfg(feature = "metal")]

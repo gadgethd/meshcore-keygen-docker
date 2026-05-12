@@ -3,13 +3,37 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+use curve25519_dalek::constants::ED25519_BASEPOINT_TABLE;
+use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::EdwardsPoint;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use crate::keygen::generate_keypair_from_random_bytes;
 use crate::types::{MeshCoreKeypair, SearchError, SearchResult, SearchStats};
 
 const BATCH_SIZE: u64 = 1024;
+
+/// Apply Ed25519 scalar clamp in place: zero low 3 bits of byte 0, zero
+/// bit 7 of byte 31, set bit 6 of byte 31.
+pub fn clamp_scalar(s: &mut [u8; 32]) {
+    s[0] &= 248;
+    s[31] &= 63;
+    s[31] |= 64;
+}
+
+/// Add `delta` (a u64, treated as the low 8 bytes of a 256-bit value) to the
+/// 32-byte little-endian scalar in place. Wraps mod 2^256.
+pub fn advance_scalar(s: &mut [u8; 32], delta: u64) {
+    let mut carry: u64 = delta;
+    for byte in s.iter_mut() {
+        let sum = (*byte as u64) + (carry & 0xFF);
+        *byte = (sum & 0xFF) as u8;
+        carry = (carry >> 8) + (sum >> 8);
+        if carry == 0 {
+            break;
+        }
+    }
+}
 
 /// Result from a single GPU batch dispatch.
 pub struct GpuBatchResult {
@@ -133,44 +157,12 @@ impl SearchHandle {
 
         let mut workers = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
-            let matchers = Arc::clone(&matchers);
-            let found = Arc::clone(&found);
-            let total_attempts = Arc::clone(&attempts);
-            let result = Arc::clone(&result);
-
-            workers.push(thread::spawn(move || {
-                let mut scalar_src = [0u8; 32];
-                let mut prefix = [0u8; 32];
-                let mut local_count: u64 = 0;
-
-                while !found.load(Ordering::Relaxed) {
-                    OsRng.fill_bytes(&mut scalar_src);
-                    OsRng.fill_bytes(&mut prefix);
-                    let kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
-                    local_count += 1;
-
-                    if local_count % BATCH_SIZE == 0 {
-                        total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
-                    }
-
-                    if should_skip(&kp.public_key) {
-                        continue;
-                    }
-
-                    if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
-                    {
-                        total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                        found.store(true, Ordering::Relaxed);
-                        *result.lock().unwrap() = Some(MatchResult {
-                            keypair: kp,
-                            matched_prefix: matched.0.clone(),
-                        });
-                        return;
-                    }
-                }
-
-                total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-            }));
+            workers.push(spawn_cpu_worker(
+                Arc::clone(&matchers),
+                Arc::clone(&found),
+                Arc::clone(&attempts),
+                Arc::clone(&result),
+            ));
         }
 
         SearchHandle {
@@ -283,45 +275,12 @@ impl SearchHandle {
 
         // Spawn CPU workers
         for _ in 0..cpu_threads {
-            let matchers = Arc::clone(&matchers);
-            let found = Arc::clone(&found);
-            let total_attempts = Arc::clone(&attempts);
-            let result = Arc::clone(&result);
-
-            workers.push(thread::spawn(move || {
-                let mut scalar_src = [0u8; 32];
-                let mut prefix = [0u8; 32];
-                let mut local_count: u64 = 0;
-
-                while !found.load(Ordering::Relaxed) {
-                    OsRng.fill_bytes(&mut scalar_src);
-                    OsRng.fill_bytes(&mut prefix);
-                    let kp = generate_keypair_from_random_bytes(&scalar_src, &prefix);
-                    local_count += 1;
-
-                    if local_count % BATCH_SIZE == 0 {
-                        total_attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
-                    }
-
-                    if should_skip(&kp.public_key) {
-                        continue;
-                    }
-
-                    if let Some(matched) =
-                        matchers.iter().find(|(_, m)| m.matches(&kp.public_key))
-                    {
-                        total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-                        found.store(true, Ordering::Relaxed);
-                        *result.lock().unwrap() = Some(MatchResult {
-                            keypair: kp,
-                            matched_prefix: matched.0.clone(),
-                        });
-                        return;
-                    }
-                }
-
-                total_attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
-            }));
+            workers.push(spawn_cpu_worker(
+                Arc::clone(&matchers),
+                Arc::clone(&found),
+                Arc::clone(&attempts),
+                Arc::clone(&result),
+            ));
         }
 
         // Spawn GPU dispatch threads
@@ -343,6 +302,74 @@ impl SearchHandle {
             workers,
         }
     }
+}
+
+/// Spawn one CPU worker thread that scans via a `+8B` chain.
+///
+/// Each worker draws a single random clamped scalar, does ONE
+/// `mul_base_clamped` to get its starting point, then iterates
+/// `point += 8·B` (cheap point add) while incrementing the scalar by 8
+/// in lockstep. This mirrors the GPU strategy: one heavy scalarmult
+/// per chain, then cheap chain steps. Compression still costs one
+/// `Z⁻¹` per iter -- curve25519-dalek's internals are `pub(crate)` so
+/// the GPU's batched-inversion / deferred-sign-bit tricks can't be
+/// applied from outside the crate, but skipping the per-attempt
+/// `mul_base_clamped` is the big win.
+fn spawn_cpu_worker(
+    matchers: Arc<Vec<(String, PrefixMatcher)>>,
+    found: Arc<AtomicBool>,
+    attempts: Arc<AtomicU64>,
+    result: Arc<Mutex<Option<MatchResult>>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let eight_b = ED25519_BASEPOINT_TABLE * &Scalar::from(8u64);
+
+        let mut scalar = [0u8; 32];
+        OsRng.fill_bytes(&mut scalar);
+        clamp_scalar(&mut scalar);
+        let mut point: EdwardsPoint = EdwardsPoint::mul_base_clamped(scalar);
+
+        let mut local_count: u64 = 0;
+
+        while !found.load(Ordering::Relaxed) {
+            let public_key = point.compress().to_bytes();
+            local_count += 1;
+
+            if local_count % BATCH_SIZE == 0 {
+                attempts.fetch_add(BATCH_SIZE, Ordering::Relaxed);
+            }
+
+            if !should_skip(&public_key) {
+                if let Some(matched) = matchers.iter().find(|(_, m)| m.matches(&public_key)) {
+                    // Prefix half of the expanded private key is just fresh
+                    // random bytes -- there's no derivation requirement on
+                    // it. One match per search, so a single OsRng draw is
+                    // fine. (Mirrors the GPU backends.)
+                    let mut prefix_half = [0u8; 32];
+                    OsRng.fill_bytes(&mut prefix_half);
+                    let mut private_key = [0u8; 64];
+                    private_key[..32].copy_from_slice(&scalar);
+                    private_key[32..].copy_from_slice(&prefix_half);
+
+                    attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+                    found.store(true, Ordering::Relaxed);
+                    *result.lock().unwrap() = Some(MatchResult {
+                        keypair: MeshCoreKeypair {
+                            public_key,
+                            private_key,
+                        },
+                        matched_prefix: matched.0.clone(),
+                    });
+                    return;
+                }
+            }
+
+            point += eight_b;
+            advance_scalar(&mut scalar, 8);
+        }
+
+        attempts.fetch_add(local_count % BATCH_SIZE, Ordering::Relaxed);
+    })
 }
 
 /// GPU dispatch loop shared by start_gpu and start_hybrid.
@@ -495,6 +522,30 @@ mod tests {
             result.matched_prefix == "A" || result.matched_prefix == "B",
             "expected matched_prefix A or B, got {}",
             result.matched_prefix
+        );
+    }
+
+    /// The `+8B` chain advances point and scalar in lockstep; if they drift
+    /// the prefix check still passes (pubkey would just have wrong prefix
+    /// origin) but the returned scalar wouldn't reproduce the pubkey. Verify
+    /// `scalar·B == returned_pubkey` via curve25519-dalek.
+    #[test]
+    fn search_handle_scalar_matches_pubkey() {
+        let handle = SearchHandle::start(&["A".to_string()], 2);
+        let result = handle.finish().expect("search should find a match");
+
+        let priv_bytes = hex::decode(&result.private_key).unwrap();
+        let mut scalar = [0u8; 32];
+        scalar.copy_from_slice(&priv_bytes[..32]);
+
+        let derived = EdwardsPoint::mul_base_clamped(scalar).compress().to_bytes();
+        let expected = hex::decode(&result.public_key).unwrap();
+        assert_eq!(
+            derived[..],
+            expected[..],
+            "scalar·B != returned pubkey: scalar={} pubkey={}",
+            hex::encode_upper(scalar),
+            result.public_key
         );
     }
 }

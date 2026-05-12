@@ -8,34 +8,12 @@ use metal::{
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use crate::search::PrefixMatcher;
+use crate::search::{advance_scalar, clamp_scalar, PrefixMatcher};
 use crate::types::MeshCoreKeypair;
 
 const KERNEL_SRC: &str = include_str!("../metal/vanity_kernel.metal");
 const BLOCK_SIZE: u64 = 256;
 const ITERS_PER_THREAD: u64 = 256;
-
-/// Apply Ed25519 scalar clamp in place: zero low 3 bits of byte 0, zero
-/// bit 7 of byte 31, set bit 6 of byte 31.
-fn clamp_scalar(s: &mut [u8; 32]) {
-    s[0] &= 248;
-    s[31] &= 63;
-    s[31] |= 64;
-}
-
-/// Add `delta` (a u64, treated as the low 8 bytes of a 256-bit value) to the
-/// 32-byte little-endian scalar in place. Wraps mod 2^256.
-fn advance_scalar(s: &mut [u8; 32], delta: u64) {
-    let mut carry: u64 = delta;
-    for byte in s.iter_mut() {
-        let sum = (*byte as u64) + (carry & 0xFF);
-        *byte = (sum & 0xFF) as u8;
-        carry = (carry >> 8) + (sum >> 8);
-        if carry == 0 {
-            break;
-        }
-    }
-}
 
 pub struct MetalSearcher {
     queue: CommandQueue,
