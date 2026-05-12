@@ -47,7 +47,7 @@ struct Cli {
     #[arg(long, conflicts_with = "cpu_only")]
     gpu_only: bool,
 
-    /// Verify GPU keygen matches host-side reference (run 64 test indices and compare)
+    /// Verify GPU keygen matches host-side reference (run 64 chain steps and compare scalar/pubkey at each step)
     #[cfg(feature = "gpu")]
     #[arg(long)]
     verify: bool,

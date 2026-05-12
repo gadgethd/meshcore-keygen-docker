@@ -14,6 +14,7 @@ mc-keygen <PREFIX>... [OPTIONS]
 - `--cpu-only` — force CPU-only search, skip GPU even if available (requires `cuda` or `metal` feature)
 - `--gpu-only` — force GPU-only search, no CPU threads (requires `cuda` or `metal` feature)
 - `--verify` — cross-check GPU keygen against CPU (requires `cuda` or `metal` feature)
+- `--benchmark <SECS>` — run GPU search for N seconds, tally every match with a no-early-exit kernel, and compare observed vs expected count to validate the reported rate (requires `cuda` or `metal` feature)
 
 When built with GPU support (`cuda` or `metal` feature), the default mode is **hybrid**: both CPU threads and GPU run concurrently, and the first match from either wins. If no GPU is detected at runtime, the tool falls back to CPU-only with a warning.
 
@@ -58,13 +59,12 @@ CUDA support requires the NVIDIA CUDA Toolkit. Metal support requires macOS with
 
 ## How it works
 
-1. Draw 64 random bytes — directly from the OS CSPRNG on CPU, or from Philox4x64-10 keyed by 128 bits of OS entropy on GPU
-2. Clamp the first 32 bytes per the Ed25519 spec to form a scalar
-3. Multiply the Ed25519 base point by the scalar to derive the public key (the second 32 bytes become the signing-nonce prefix half of the expanded private key)
-4. Check if the public key hex starts with the target prefix
-5. Repeat across all cores (or GPU threads) until a match is found
+1. Draw 64 random bytes from the OS CSPRNG
+2. Clamp the first 32 bytes to form an Ed25519 scalar
+3. Multiply the base point by the scalar to get the public key
+4. If the hex starts with the target prefix, return; otherwise repeat
 
-Keys starting with `00` or `FF` are skipped (reserved by MeshCore).
+Keys starting with `00` or `FF` are skipped (reserved by MeshCore). On GPU, only the starting scalar per thread is drawn from the CSPRNG — successive candidates come from repeated +8B point addition (see [docs/gpu.md](docs/gpu.md)).
 
 ## Sources
 

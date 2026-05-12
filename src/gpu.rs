@@ -241,7 +241,7 @@ impl CudaSearcher {
     /// Uses the searcher's `start_scalar` (drawn from OsRng) and advances it
     /// by `8 * keys_checked` after the launch so subsequent batches cover
     /// fresh territory. The legacy `_base_nonce` arg is kept for trait
-    /// compatibility with the old (Philox) interface and ignored.
+    /// compatibility and ignored on this backend.
     pub fn search_batch(&mut self, _base_nonce: u64) -> Result<CudaBatchResult, CudaError> {
         let total_threads = (self.grid_size * BLOCK_SIZE) as u64;
         let keys_checked = total_threads * ITERS_PER_THREAD;
@@ -351,8 +351,8 @@ impl crate::search::GpuSearcher for CudaSearcher {
         &mut self,
         base_nonce: u64,
     ) -> Result<crate::search::GpuBatchResult, Box<dyn std::error::Error + Send + Sync>> {
-        // The trait still calls this `base_nonce`; for the CUDA backend it's
-        // the Philox counter offset.
+        // The trait still calls this `base_nonce`; the CUDA backend ignores it
+        // and draws/advances its own `start_scalar` from OsRng instead.
         let result = self.search_batch(base_nonce)?;
         Ok(crate::search::GpuBatchResult {
             keys_checked: result.keys_checked,
