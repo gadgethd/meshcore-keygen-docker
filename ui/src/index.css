@@ -328,6 +328,42 @@ textarea { resize:vertical; min-height:60px; }
   position: absolute; top: -20px; font-size: 9px; color: var(--text-muted);
   transform: translateX(-50%); white-space: nowrap; font-weight: 500;
 }
+.probability-progress {
+  --axis-pad: 40px;
+  padding: 8px 0 42px;
+}
+.progress-bar.probability-axis {
+  margin: 0 var(--axis-pad);
+  overflow: visible;
+}
+.progress-bar.probability-axis .fill {
+  overflow: hidden;
+}
+.probability-axis-labels {
+  position: relative;
+  height: 34px;
+  margin: 12px var(--axis-pad) 0;
+}
+.probability-axis-label {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  width: 80px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+.probability-axis-label strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--font-tabular);
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+}
 
 /* ── Glass Table ────────────────────────────── */
 .glass-table {

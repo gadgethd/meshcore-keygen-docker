@@ -52,6 +52,48 @@ export function ProgressBar({ pct, markers }: { pct: number; markers?: { at: num
   );
 }
 
+export function ProbabilityProgress({ attempts, expected }: { attempts: number; expected: number }) {
+  const safeExpected = Math.max(expected, 1);
+  const milestones = [
+    { probability: 0.5, label: '50%' },
+    { probability: 0.9, label: '90%' },
+    { probability: 0.95, label: '95%' },
+    { probability: 0.99, label: '99%' },
+  ].map(m => ({
+    ...m,
+    attempts: -Math.log(1 - m.probability) * safeExpected,
+  }));
+  const maxAttempts = milestones[milestones.length - 1].attempts;
+  const pct = Math.min((attempts / maxAttempts) * 100, 100);
+
+  return (
+    <div className="probability-progress">
+      <div className="progress-bar probability-axis">
+        <div className="fill" style={{ width: `${pct}%` }} />
+        {milestones.map(m => (
+          <div
+            key={m.label}
+            className="marker"
+            style={{ left: `${(m.attempts / maxAttempts) * 100}%` }}
+          />
+        ))}
+      </div>
+      <div className="probability-axis-labels">
+        {milestones.map(m => (
+          <div
+            key={m.label}
+            className="probability-axis-label"
+            style={{ left: `${(m.attempts / maxAttempts) * 100}%` }}
+          >
+            <span>{m.label}</span>
+            <strong>{formatNum(Math.round(m.attempts))}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function EmptyState({ icon, title, desc, action }: { icon: string; title: string; desc: string; action?: React.ReactNode }) {
   return (
     <div className="glass-card">

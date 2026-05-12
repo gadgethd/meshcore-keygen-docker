@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api, SystemStatus } from '../../api';
-import { MetricCard, StatusChip, PrefixBadge, DeviceBadge, ProgressBar, EmptyState, ErrorBanner, formatKps, formatNum, formatPct, TimeDisplay } from '../shared';
+import { MetricCard, StatusChip, PrefixBadge, DeviceBadge, ProbabilityProgress, EmptyState, ErrorBanner, formatKps, formatNum, formatPct, TimeDisplay } from '../shared';
 
 export default function Dashboard() {
   const [s, setS] = useState<SystemStatus | null>(null);
@@ -18,7 +18,8 @@ export default function Dashboard() {
 
   const job = s?.active_job;
   const minLen = job && job.prefixes.length > 0 ? Math.min(...job.prefixes.map(p => p.length)) : 0;
-  const expected = 16 ** minLen;
+  const sameLenCount = job ? job.prefixes.filter(p => p.length === minLen).length : 0;
+  const expected = minLen > 0 ? (16 ** minLen) / Math.max(sameLenCount, 1) : 1;
   const prob = job ? 1 - Math.exp(-job.attempts_done / Math.max(expected, 1)) : 0;
 
   return (
@@ -49,9 +50,7 @@ export default function Dashboard() {
                 <MetricCard label="Probability" value={formatPct(prob)} />
                 <MetricCard label="Elapsed" value={<TimeDisplay seconds={job.elapsed_seconds} />} />
               </div>
-              <ProgressBar pct={prob * 100} markers={[
-                { at: 50, label: '50%' }, { at: 90, label: '90%' }, { at: 95, label: '95%' }, { at: 99, label: '99%' }
-              ]} />
+              <ProbabilityProgress attempts={job.attempts_done} expected={expected} />
             </div>
           ) : (
             <div className="glass-card hero" style={{ marginBottom: 20 }}>

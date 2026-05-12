@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api, SystemStatus } from '../../api';
-import { MetricCard, StatusChip, PrefixBadge, DeviceBadge, ProgressBar, CopyButton, TimeDisplay, EmptyState, formatKps, formatNum, formatPct } from '../shared';
+import { MetricCard, StatusChip, PrefixBadge, DeviceBadge, ProbabilityProgress, CopyButton, TimeDisplay, EmptyState, formatKps, formatNum, formatPct } from '../shared';
 
 export default function ActiveJob() {
   const [s, setS] = useState<SystemStatus | null>(null);
@@ -23,7 +23,8 @@ export default function ActiveJob() {
   );
 
   const minLen = Math.min(...job.prefixes.map(p => p.length));
-  const expected = 16 ** minLen;
+  const sameLenCount = job.prefixes.filter(p => p.length === minLen).length;
+  const expected = (16 ** minLen) / Math.max(sameLenCount, 1);
   const prob = 1 - Math.exp(-job.attempts_done / expected);
 
   const act = async (fn: () => Promise<any>) => { try { await fn(); } catch(e: any) { setError(e.message); } };
@@ -55,13 +56,7 @@ export default function ActiveJob() {
 
       <div className="glass-card" style={{ marginBottom: 20 }}>
         <div className="panel-header"><span className="panel-title">Probability Progress</span></div>
-        <ProgressBar pct={prob * 100} markers={[{ at: 50, label: '50%' },{ at: 90, label: '90%' },{ at: 95, label: '95%' },{ at: 99, label: '99%' }]} />
-        <div className="grid grid-4" style={{ marginTop: 14 }}>
-          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>50%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 0.693))}</div></div>
-          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>90%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 2.302))}</div></div>
-          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>95%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 2.996))}</div></div>
-          <div><span className="text-muted" style={{ fontSize: 10, textTransform: 'uppercase' }}>99%</span><div className="tabular" style={{ fontWeight: 600 }}>{formatNum(Math.round(expected * 4.605))}</div></div>
-        </div>
+        <ProbabilityProgress attempts={job.attempts_done} expected={expected} />
       </div>
 
       <div className="grid grid-2">
