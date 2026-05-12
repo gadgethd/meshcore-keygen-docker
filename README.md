@@ -84,6 +84,7 @@ mc-keygen <PREFIX>... [OPTIONS]
 | `--benchmark` | Run a benchmark with random prefix |
 | `--benchmark-prefix-length <N>` | Benchmark prefix length (default: 6) |
 | `--benchmark-timeout <N>` | Benchmark timeout in seconds |
+| `--gpu-benchmark <SECS>` | Run GPU search for N seconds, tally every match with a no-early-exit kernel, and compare observed vs expected count |
 | `--serve` | Start web server (requires `server` feature) |
 
 **GPU flags (with `cuda` feature):**
@@ -232,6 +233,15 @@ cargo clippy --no-deps
 - Use `APP_PASSWORD` env var for basic auth (future)
 - Do not expose the web UI to the public internet without a reverse proxy
 - Back up `/data` to preserve jobs, results, and settings
+
+## Search algorithm
+
+1. Draw 64 random bytes from the OS CSPRNG
+2. Clamp the first 32 bytes to form an Ed25519 scalar
+3. Multiply the base point by the scalar to get the public key
+4. If the hex starts with the target prefix, return; otherwise repeat
+
+Keys starting with `00` or `FF` are skipped (reserved by MeshCore). On GPU, only the starting scalar per thread is drawn from the CSPRNG; successive candidates come from repeated +8B point addition (see [docs/gpu.md](docs/gpu.md)).
 
 ## License
 

@@ -14,7 +14,7 @@
 //   Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
 //   BSD 3-Clause license (see cuda/THIRD-PARTY-NOTICES for full text)
 //
-// SHA-512 and vanity search kernels are original work.
+// The vanity search and count kernels are original work.
 // ============================================================================
 
 #include <metal_stdlib>
@@ -3262,117 +3262,62 @@ void  ge_tobytes(thread unsigned char *s, thread const ge_p2 *h) {
     s[31] ^= fe_isnegative(x) << 7;
 }
 
-// ============================================================================
-// SHA-512 (single block, 32-byte input)
-// ============================================================================
-
+// Short type aliases used by the vanity kernels below.
 typedef uint64_t u64;
-typedef unsigned int       u32_t;
-typedef unsigned char      u8;
-
-constant u64 K512[80] = {
-    0x428a2f98d728ae22ULL, 0x7137449123ef65cdULL, 0xb5c0fbcfec4d3b2fULL,
-    0xe9b5dba58189dbbcULL, 0x3956c25bf348b538ULL, 0x59f111f1b605d019ULL,
-    0x923f82a4af194f9bULL, 0xab1c5ed5da6d8118ULL, 0xd807aa98a3030242ULL,
-    0x12835b0145706fbeULL, 0x243185be4ee4b28cULL, 0x550c7dc3d5ffb4e2ULL,
-    0x72be5d74f27b896fULL, 0x80deb1fe3b1696b1ULL, 0x9bdc06a725c71235ULL,
-    0xc19bf174cf692694ULL, 0xe49b69c19ef14ad2ULL, 0xefbe4786384f25e3ULL,
-    0x0fc19dc68b8cd5b5ULL, 0x240ca1cc77ac9c65ULL, 0x2de92c6f592b0275ULL,
-    0x4a7484aa6ea6e483ULL, 0x5cb0a9dcbd41fbd4ULL, 0x76f988da831153b5ULL,
-    0x983e5152ee66dfabULL, 0xa831c66d2db43210ULL, 0xb00327c898fb213fULL,
-    0xbf597fc7beef0ee4ULL, 0xc6e00bf33da88fc2ULL, 0xd5a79147930aa725ULL,
-    0x06ca6351e003826fULL, 0x142929670a0e6e70ULL, 0x27b70a8546d22ffcULL,
-    0x2e1b21385c26c926ULL, 0x4d2c6dfc5ac42aedULL, 0x53380d139d95b3dfULL,
-    0x650a73548baf63deULL, 0x766a0abb3c77b2a8ULL, 0x81c2c92e47edaee6ULL,
-    0x92722c851482353bULL, 0xa2bfe8a14cf10364ULL, 0xa81a664bbc423001ULL,
-    0xc24b8b70d0f89791ULL, 0xc76c51a30654be30ULL, 0xd192e819d6ef5218ULL,
-    0xd69906245565a910ULL, 0xf40e35855771202aULL, 0x106aa07032bbd1b8ULL,
-    0x19a4c116b8d2d0c8ULL, 0x1e376c085141ab53ULL, 0x2748774cdf8eeb99ULL,
-    0x34b0bcb5e19b48a8ULL, 0x391c0cb3c5c95a63ULL, 0x4ed8aa4ae3418acbULL,
-    0x5b9cca4f7763e373ULL, 0x682e6ff3d6b2b8a3ULL, 0x748f82ee5defb2fcULL,
-    0x78a5636f43172f60ULL, 0x84c87814a1f0ab72ULL, 0x8cc702081a6439ecULL,
-    0x90befffa23631e28ULL, 0xa4506cebde82bde9ULL, 0xbef9a3f7b2c67915ULL,
-    0xc67178f2e372532bULL, 0xca273eceea26619cULL, 0xd186b8c721c0c207ULL,
-    0xeada7dd6cde0eb1eULL, 0xf57d4f7fee6ed178ULL, 0x06f067aa72176fbaULL,
-    0x0a637dc5a2c898a6ULL, 0x113f9804bef90daeULL, 0x1b710b35131c471bULL,
-    0x28db77f523047d84ULL, 0x32caab7b40c72493ULL, 0x3c9ebe0a15c9bebcULL,
-    0x431d67c49c100d4cULL, 0x4cc5d4becb3e42b6ULL, 0x597f299cfc657e2aULL,
-    0x5fcb6fab3ad6faecULL, 0x6c44198c4a475817ULL
-};
-
-inline u64 rotr64(u64 x, uint n) { return (x >> n) | (x << (64 - n)); }
-inline u64 Sha_Ch(u64 x, u64 y, u64 z) { return (x & y) ^ (~x & z); }
-inline u64 Sha_Maj(u64 x, u64 y, u64 z) { return (x & y) ^ (x & z) ^ (y & z); }
-inline u64 Sha_Sigma0(u64 x) { return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39); }
-inline u64 Sha_Sigma1(u64 x) { return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41); }
-inline u64 sha_sigma0(u64 x) { return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7); }
-inline u64 sha_sigma1(u64 x) { return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6); }
-
-inline u64 load_be64(thread const u8 *p) {
-    return ((u64)p[0]<<56)|((u64)p[1]<<48)|((u64)p[2]<<40)|((u64)p[3]<<32)|
-           ((u64)p[4]<<24)|((u64)p[5]<<16)|((u64)p[6]<<8)|((u64)p[7]);
-}
-inline void store_be64(thread u8 *p, u64 v) {
-    p[0]=(u8)(v>>56);p[1]=(u8)(v>>48);p[2]=(u8)(v>>40);p[3]=(u8)(v>>32);
-    p[4]=(u8)(v>>24);p[5]=(u8)(v>>16);p[6]=(u8)(v>>8);p[7]=(u8)v;
-}
-
- void sha512_32(thread u8 *out, thread const u8 *msg) {
-    u64 W[80];
-    W[0]=load_be64(msg); W[1]=load_be64(msg+8);
-    W[2]=load_be64(msg+16); W[3]=load_be64(msg+24);
-    W[4]=0x8000000000000000ULL;
-    for (int i = 5; i < 15; i++) W[i] = 0;
-    W[15] = 256;
-    for (int i = 16; i < 80; i++)
-        W[i] = sha_sigma1(W[i-2]) + W[i-7] + sha_sigma0(W[i-15]) + W[i-16];
-    u64 a=0x6a09e667f3bcc908ULL, b=0xbb67ae8584caa73bULL,
-        c=0x3c6ef372fe94f82bULL, dd=0xa54ff53a5f1d36f1ULL,
-        e=0x510e527fade682d1ULL, f=0x9b05688c2b3e6c1fULL,
-        g=0x1f83d9abfb41bd6bULL, h=0x5be0cd19137e2179ULL;
-    for (int i = 0; i < 80; i++) {
-        u64 T1 = h + Sha_Sigma1(e) + Sha_Ch(e,f,g) + K512[i] + W[i];
-        u64 T2 = Sha_Sigma0(a) + Sha_Maj(a,b,c);
-        h=g; g=f; f=e; e=dd+T1; dd=c; c=b; b=a; a=T1+T2;
-    }
-    a+=0x6a09e667f3bcc908ULL; b+=0xbb67ae8584caa73bULL;
-    c+=0x3c6ef372fe94f82bULL; dd+=0xa54ff53a5f1d36f1ULL;
-    e+=0x510e527fade682d1ULL; f+=0x9b05688c2b3e6c1fULL;
-    g+=0x1f83d9abfb41bd6bULL; h+=0x5be0cd19137e2179ULL;
-    store_be64(out,a); store_be64(out+8,b);
-    store_be64(out+16,c); store_be64(out+24,dd);
-    store_be64(out+32,e); store_be64(out+40,f);
-    store_be64(out+48,g); store_be64(out+56,h);
-}
+typedef unsigned char u8;
 
 // ============================================================================
 // Verification kernel
 // ============================================================================
 
+// Single-threaded chain verifier. Walks the same sequential-scalar /
+// point-addition chain that vanity_search uses (one initial scalarmult,
+// then +8B per step) and writes the pubkey + scalar at every step. The
+// host compares against direct scalarmult via curve25519-dalek to confirm
+// both the initial mult AND the +8B chain stay in sync.
 kernel void verify_keygen(
-    const device u8 *seeds [[buffer(0)]],
+    const device u8 *start_scalar_bytes [[buffer(0)]],
     device u8 *pubkeys [[buffer(1)]],
-    device u8 *privkeys [[buffer(2)]],
+    device u8 *scalars [[buffer(2)]],
     constant unsigned int& count [[buffer(3)]],
     uint tid [[thread_position_in_grid]])
 {
-    if (tid >= count) return;
-    // Copy seed from device to thread-local (functions operate on thread pointers)
-    u8 local_seed[32];
-    for (int i = 0; i < 32; i++) local_seed[i] = seeds[tid * 32 + i];
-    u8 hash[64];
-    sha512_32(hash, local_seed);
-    u8 scalar[32];
-    for (int i = 0; i < 32; i++) scalar[i] = hash[i];
-    scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
+    if (tid != 0) return;
+    u8 my_scalar[32];
+    for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
+
     ge_p3 A;
-    ge_scalarmult_base(&A, scalar);
-    u8 local_pubkey[32];
-    ge_p3_tobytes(local_pubkey, &A);
-    // Copy results to device buffers
-    for (int i = 0; i < 32; i++) pubkeys[tid * 32 + i] = local_pubkey[i];
-    for (int i = 0; i < 32; i++) privkeys[tid*64 + i] = scalar[i];
-    for (int i = 0; i < 32; i++) privkeys[tid*64 + 32 + i] = hash[32 + i];
+    ge_scalarmult_base(&A, my_scalar);
+
+    // Stage 8B (= base[0][7]) into thread space so ge_madd can take its
+    // address; MSL won't accept a `constant` pointer where `thread` is
+    // expected.
+    ge_precomp eight_B;
+    ge_precomp_copy_from_constant(&eight_B, &base[0][7]);
+
+    for (unsigned int i = 0; i < count; i++) {
+        u8 local_pubkey[32];
+        ge_p3_tobytes(local_pubkey, &A);
+        for (int j = 0; j < 32; j++) pubkeys[i * 32 + j] = local_pubkey[j];
+        for (int j = 0; j < 32; j++) scalars[i * 32 + j] = my_scalar[j];
+
+        // A += 8B
+        ge_p1p1 r;
+        ge_madd(&r, &A, &eight_B);
+        ge_p1p1_to_p3(&A, &r);
+
+        // my_scalar += 8 (low-byte add with carry; stays clamped because we
+        // only touch bits >= 3 and the high-byte clamp bits won't roll for
+        // any plausible search length).
+        unsigned int sum = (unsigned int)my_scalar[0] + 8u;
+        my_scalar[0] = (u8)(sum & 0xFFu);
+        unsigned int carry = sum >> 8;
+        for (int j = 1; j < 32 && carry; j++) {
+            unsigned int s = (unsigned int)my_scalar[j] + carry;
+            my_scalar[j] = (u8)(s & 0xFFu);
+            carry = s >> 8;
+        }
+    }
 }
 
 // ============================================================================
@@ -3413,43 +3358,220 @@ int check_any_prefix(thread const u8 *pubkey, constant const u8 *prefix_data,
     return 0;
 }
 
+// Batch size for Montgomery inversion. Must divide iters_per_thread evenly.
+#define VANITY_BATCH 16
+
+// Sequential-scalar search with Montgomery batch inversion. Each thread does
+// ONE scalarmult to derive its starting point, then iterates +8B (cheap point
+// add). Compression (which needs Z^{-1}) is deferred and batched: gather B
+// points, do one fe_invert for the whole batch, then check each. Skipping the
+// X*Z^{-1} multiply on non-matches saves another fe_mul per iter (the prefix
+// check only touches the low bytes of the encoded y, where the sign bit
+// doesn't reach -- main.rs caps prefix length at 62 nibbles for that reason).
 kernel void vanity_search(
     device u8 *result [[buffer(0)]],
     constant u8 *prefix_data [[buffer(1)]],
     constant unsigned int& prefix_count [[buffer(2)]],
-    constant uint64_t& base_nonce [[buffer(3)]],
+    constant u8 *start_scalar_bytes [[buffer(3)]],
     constant uint64_t& iters_per_thread [[buffer(4)]],
-    constant u8 *seed_salt [[buffer(5)]],
     uint tid [[thread_position_in_grid]])
 {
-    for (uint64_t iter = 0; iter < iters_per_thread; iter++) {
-        // Early exit: atomic load instead of volatile cast
+    // Per-thread starting scalar = start + 8 * tid * iters_per_thread.
+    u8 my_scalar[32];
+    for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
+    {
+        uint64_t offset = 8ULL * (uint64_t)tid * iters_per_thread;
+        uint64_t carry = 0;
+        for (int i = 0; i < 32; i++) {
+            uint64_t byte_add = (i < 8) ? ((offset >> (i * 8)) & 0xFFULL) : 0ULL;
+            uint64_t s = (uint64_t)my_scalar[i] + byte_add + carry;
+            my_scalar[i] = (u8)(s & 0xFFULL);
+            carry = s >> 8;
+        }
+    }
+
+    ge_p3 A;
+    ge_scalarmult_base(&A, my_scalar);
+
+    // Stage 8B into thread space (see verify_keygen for why).
+    ge_precomp eight_B;
+    ge_precomp_copy_from_constant(&eight_B, &base[0][7]);
+
+    // Per-thread batch storage. fe is int32[10] = 40 bytes.
+    fe batch_X[VANITY_BATCH];
+    fe batch_Y[VANITY_BATCH];
+    fe batch_Z[VANITY_BATCH];
+    fe products[VANITY_BATCH];
+
+    uint64_t batches = iters_per_thread / VANITY_BATCH;
+    for (uint64_t b = 0; b < batches; b++) {
         if (atomic_load_explicit((device atomic_uint*)result, memory_order_relaxed) != 0)
             return;
-        uint64_t idx = base_nonce + (uint64_t)tid * iters_per_thread + iter;
-        u8 seed[32];
-        for (int i = 0; i < 8; i++) seed[i] = (u8)(idx >> (i * 8));
-        for (int i = 8; i < 32; i++) seed[i] = seed_salt[i - 8];
-        u8 hash[64];
-        sha512_32(hash, seed);
-        u8 scalar[32];
-        for (int i = 0; i < 32; i++) scalar[i] = hash[i];
-        scalar[0] &= 248; scalar[31] &= 63; scalar[31] |= 64;
-        ge_p3 A;
-        ge_scalarmult_base(&A, scalar);
-        u8 pubkey[32];
-        ge_p3_tobytes(pubkey, &A);
-        if (pubkey[0] == 0x00 || pubkey[0] == 0xFF) continue;
-        if (check_any_prefix(pubkey, prefix_data, prefix_count)) {
-            // Atomic exchange: first thread to set flag wins
-            uint old = atomic_exchange_explicit(
-                (device atomic_uint*)result, 1, memory_order_relaxed);
-            if (old == 0) {
-                for (int i = 0; i < 32; i++) result[4 + i] = pubkey[i];
-                for (int i = 0; i < 32; i++) result[36 + i] = scalar[i];
-                for (int i = 0; i < 32; i++) result[68 + i] = hash[32 + i];
+
+        // Phase 1: snapshot (X,Y,Z) at each chain step and accumulate the
+        // running product of Zs. After this loop A has advanced past the batch.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            for (int k = 0; k < 10; k++) {
+                batch_X[i][k] = A.X[k];
+                batch_Y[i][k] = A.Y[k];
+                batch_Z[i][k] = A.Z[k];
             }
-            return;
+            if (i == 0) {
+                for (int k = 0; k < 10; k++) products[i][k] = batch_Z[i][k];
+            } else {
+                fe_mul(products[i], products[i-1], batch_Z[i]);
+            }
+            ge_p1p1 r;
+            ge_madd(&r, &A, &eight_B);
+            ge_p1p1_to_p3(&A, &r);
         }
+
+        // Phase 2: one inversion of the full product.
+        fe all_inv;
+        fe_invert(all_inv, products[VANITY_BATCH - 1]);
+
+        // Phase 3: backward pass to extract individual Z inverses. Overwrites
+        // batch_Z in place (its original values get rolled into `running`
+        // before being clobbered).
+        fe running;
+        for (int k = 0; k < 10; k++) running[k] = all_inv[k];
+        for (int i = VANITY_BATCH - 1; i > 0; i--) {
+            fe temp_inv;
+            fe_mul(temp_inv, running, products[i-1]);  // = Z_i^{-1}
+            fe new_running;
+            fe_mul(new_running, running, batch_Z[i]);  // = (Z_0 * ... * Z_{i-1})^{-1}
+            for (int k = 0; k < 10; k++) {
+                running[k] = new_running[k];
+                batch_Z[i][k] = temp_inv[k];
+            }
+        }
+        for (int k = 0; k < 10; k++) batch_Z[0][k] = running[k];
+
+        // Phase 4: compute y = Y/Z, encode, prefix-check each point.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            fe y;
+            fe_mul(y, batch_Y[i], batch_Z[i]);
+            u8 pubkey[32];
+            fe_tobytes(pubkey, y);
+
+            if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
+                && check_any_prefix(pubkey, prefix_data, prefix_count)) {
+                fe x;
+                fe_mul(x, batch_X[i], batch_Z[i]);
+                pubkey[31] ^= fe_isnegative(x) << 7;
+
+                u8 match_scalar[32];
+                for (int k = 0; k < 32; k++) match_scalar[k] = my_scalar[k];
+                uint64_t matched_offset = 8ULL * (b * VANITY_BATCH + (uint64_t)i);
+                uint64_t carry = 0;
+                for (int k = 0; k < 32; k++) {
+                    uint64_t byte_add = (k < 8) ? ((matched_offset >> (k * 8)) & 0xFFULL) : 0ULL;
+                    uint64_t s = (uint64_t)match_scalar[k] + byte_add + carry;
+                    match_scalar[k] = (u8)(s & 0xFFULL);
+                    carry = s >> 8;
+                }
+
+                uint old = atomic_exchange_explicit(
+                    (device atomic_uint*)result, 1, memory_order_relaxed);
+                if (old == 0) {
+                    for (int k = 0; k < 32; k++) result[4 + k] = pubkey[k];
+                    for (int k = 0; k < 32; k++) result[36 + k] = match_scalar[k];
+                }
+                return;
+            }
+        }
+    }
+}
+
+// Benchmark variant: identical math to vanity_search, but never exits early
+// and counts EVERY match into an atomic counter. The host can cross-check
+// the reported throughput against observed match frequency.
+kernel void vanity_count_matches(
+    device atomic_uint *match_counter [[buffer(0)]],
+    constant u8 *prefix_data [[buffer(1)]],
+    constant unsigned int& prefix_count [[buffer(2)]],
+    constant u8 *start_scalar_bytes [[buffer(3)]],
+    constant uint64_t& iters_per_thread [[buffer(4)]],
+    uint tid [[thread_position_in_grid]])
+{
+    u8 my_scalar[32];
+    for (int i = 0; i < 32; i++) my_scalar[i] = start_scalar_bytes[i];
+    {
+        uint64_t offset = 8ULL * (uint64_t)tid * iters_per_thread;
+        uint64_t carry = 0;
+        for (int i = 0; i < 32; i++) {
+            uint64_t byte_add = (i < 8) ? ((offset >> (i * 8)) & 0xFFULL) : 0ULL;
+            uint64_t s = (uint64_t)my_scalar[i] + byte_add + carry;
+            my_scalar[i] = (u8)(s & 0xFFULL);
+            carry = s >> 8;
+        }
+    }
+
+    ge_p3 A;
+    ge_scalarmult_base(&A, my_scalar);
+
+    // Stage 8B into thread space (see verify_keygen for why).
+    ge_precomp eight_B;
+    ge_precomp_copy_from_constant(&eight_B, &base[0][7]);
+
+    fe batch_Y[VANITY_BATCH];
+    fe batch_Z[VANITY_BATCH];
+    fe products[VANITY_BATCH];
+
+    unsigned int local_matches = 0;
+
+    uint64_t batches = iters_per_thread / VANITY_BATCH;
+    for (uint64_t b = 0; b < batches; b++) {
+        // Phase 1: snapshot (Y,Z) and accumulate products. X not needed since
+        // we only count matches, not emit pubkeys.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            for (int k = 0; k < 10; k++) {
+                batch_Y[i][k] = A.Y[k];
+                batch_Z[i][k] = A.Z[k];
+            }
+            if (i == 0) {
+                for (int k = 0; k < 10; k++) products[i][k] = batch_Z[i][k];
+            } else {
+                fe_mul(products[i], products[i-1], batch_Z[i]);
+            }
+            ge_p1p1 r;
+            ge_madd(&r, &A, &eight_B);
+            ge_p1p1_to_p3(&A, &r);
+        }
+
+        // Phase 2: one inversion.
+        fe all_inv;
+        fe_invert(all_inv, products[VANITY_BATCH - 1]);
+
+        // Phase 3: backward extract Z inverses.
+        fe running;
+        for (int k = 0; k < 10; k++) running[k] = all_inv[k];
+        for (int i = VANITY_BATCH - 1; i > 0; i--) {
+            fe temp_inv;
+            fe_mul(temp_inv, running, products[i-1]);
+            fe new_running;
+            fe_mul(new_running, running, batch_Z[i]);
+            for (int k = 0; k < 10; k++) {
+                running[k] = new_running[k];
+                batch_Z[i][k] = temp_inv[k];
+            }
+        }
+        for (int k = 0; k < 10; k++) batch_Z[0][k] = running[k];
+
+        // Phase 4: count matches.
+        for (int i = 0; i < VANITY_BATCH; i++) {
+            fe y;
+            fe_mul(y, batch_Y[i], batch_Z[i]);
+            u8 pubkey[32];
+            fe_tobytes(pubkey, y);
+            if (pubkey[0] != 0x00 && pubkey[0] != 0xFF
+                && check_any_prefix(pubkey, prefix_data, prefix_count)) {
+                local_matches++;
+            }
+        }
+    }
+
+    if (local_matches > 0) {
+        atomic_fetch_add_explicit(match_counter, local_matches, memory_order_relaxed);
     }
 }
